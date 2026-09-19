@@ -1,4 +1,4 @@
-name: Config Tester
+name: Test
 
 on:
   schedule:
