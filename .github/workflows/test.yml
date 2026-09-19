@@ -1,29 +1,40 @@
 name: Config Tester
 
 on:
-  workflow_dispatch: # اجرای دستی
   schedule:
-    - cron: '0 * * * *' # اجرای خودکار هر یک ساعت یک‌بار
+    # هر ۳ ساعت — طبق نیاز خودتان تغییر بدهید
+    - cron: "0 */3 * * *"
+  workflow_dispatch: {}
 
 jobs:
-  test:
+  test-and-update:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Download server list
-        env:
-          CF_ALL_URL: ${{ secrets.CF_ALL_URL }}
-        run: |
-          echo "Downloading server list..."
-          curl -fL --retry 3 --connect-timeout 15 "$CF_ALL_URL" -o servers.txt
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: "20"
 
-      - name: Run tester script
-        run: node index.js
+      - name: Download Xray-core
+        run: |
+          curl -L -o xray.zip \
+            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -o xray.zip -d xray-bin
+          chmod +x xray-bin/xray
+          xray-bin/xray version
+
+      - name: Run tester
+        env:
+          CF_ALL_URL: ${{ secrets.CF_ALL_URL }}
+          CF_UPDATE_URL: ${{ secrets.CF_UPDATE_URL }}
+          GH_RAW_URL: "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Splitted-By-Protocol/vmess.txt"
+          XRAY_BIN: ${{ github.workspace }}/xray-bin/xray
+          MAX_CANDIDATES: "300"
+          CONCURRENCY: "12"
+          MIN_KEEP_RATIO: "0.5"
+        run: node scripts/test-and-update-servers.mjs
