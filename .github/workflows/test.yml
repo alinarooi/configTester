@@ -1,31 +1,29 @@
 name: Config Tester
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # اجرای دستی
+  schedule:
+    - cron: '0 * * * *' # اجرای خودکار هر یک ساعت یک‌بار
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
       - name: Download server list
         env:
           CF_ALL_URL: ${{ secrets.CF_ALL_URL }}
         run: |
           echo "Downloading server list..."
+          curl -fL --retry 3 --connect-timeout 15 "$CF_ALL_URL" -o servers.txt
 
-          curl -fL \
-            --retry 3 \
-            --connect-timeout 15 \
-            "$CF_ALL_URL" \
-            -o servers.txt
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
 
-          echo "Download completed."
-
-      - name: Check server list
-        run: |
-          echo "File size:"
-          wc -c servers.txt
-
-          echo "Number of lines:"
-          wc -l servers.txt
+      - name: Run tester script
+        run: node index.js
