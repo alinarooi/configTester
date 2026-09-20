@@ -1,9 +1,9 @@
-name: Test
+name: Test & Update Server List
 
 on:
   schedule:
     # هر ۳ ساعت — طبق نیاز خودتان تغییر بدهید
-    - cron: "0 */3 * * *"
+    - cron: "0 */1 * * *"
   workflow_dispatch: {}
 
 jobs:
@@ -14,6 +14,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Debug — list files
+        run: |
+          echo "--- آخرین کامیت ---"
+          git log -1 --oneline
+          echo "--- شاخه ---"
+          git branch --show-current
+          echo "--- کل فایل‌های .mjs در ریپو ---"
+          find . -name "*.mjs" -not -path "./node_modules/*"
+          echo "--- محتوای پوشه‌ی scripts (اگر وجود دارد) ---"
+          ls -la scripts/ 2>&1 || echo "پوشه‌ی scripts در ریشه پیدا نشد!"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -34,7 +45,9 @@ jobs:
           CF_UPDATE_URL: ${{ secrets.CF_UPDATE_URL }}
           GH_RAW_URL: "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/Splitted-By-Protocol/vmess.txt"
           XRAY_BIN: ${{ github.workspace }}/xray-bin/xray
-          MAX_CANDIDATES: "300"
+          MAX_CANDIDATES: "1000"
           CONCURRENCY: "12"
           MIN_KEEP_RATIO: "0.5"
+          MAX_SSTP_CANDIDATES: "1000"
+          SSTP_CONCURRENCY: "30"
         run: node scripts/test-and-update-servers.mjs
