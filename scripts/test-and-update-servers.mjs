@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import tls from "node:tls";
 
 const execFileP = promisify(execFile);
 
@@ -33,6 +34,13 @@ const CORE_WARMUP_MS = Number(process.env.CORE_WARMUP_MS || 400);
 const TEST_TIMEOUT_S = Number(process.env.TEST_TIMEOUT_S || 6);
 const TEST_URL = "https://www.gstatic.com/generate_204";
 const BASE_PORT = 20000;
+
+// --- VPNGate / SSTP ---
+const VPNGATE_API_URL = "http://www.vpngate.net/api/iphone/";
+const SSTP_PORT = 443;
+const MAX_SSTP_CANDIDATES = Number(process.env.MAX_SSTP_CANDIDATES || 200);
+const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 30);
+const SSTP_TIMEOUT_MS = Number(process.env.SSTP_TIMEOUT_MS || 6000);
 
 /**
  * محافظ در برابر حذف ناگهانی: چون Worker فعلی هیچ اعتبارسنجی روی بدنه‌ی
@@ -62,6 +70,10 @@ async function fetchCloudflareServers(url) {
     .map((o, i) => ({
       uri: String(o.address || "").trim(),
       name: String(o.country || `کلودفلر-${i + 1}`),
+      // port را عیناً از روی داده‌ی موجود نگه می‌داریم: یا رشته‌ی
+      // "v2ray" (سرورهای V2Ray) یا یک عدد (سرورهای SSTP). این‌طور
+      // رکوردهای تست‌نشده هنگام merge نوع‌شان را از دست نمی‌دهند.
+      port: o.port === "v2ray" ? "v2ray" : Number(o.port) || "v2ray",
       ping: -1,
     }))
     .filter((s) => s.uri.length > 0);
@@ -82,7 +94,7 @@ async function fetchGithubConfigs(url) {
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => schemes.some((s) => l.startsWith(s)))
-    .map((uri, i) => ({ uri, name: `گیت‌هاب-${i + 1}`, ping: -1 }));
+    .map((uri, i) => ({ uri, name: `گیت‌هاب-${i + 1}`, port: "v2ray", ping: -1 }));
 }
 
 function tryBase64Decode(s) {
@@ -379,6 +391,122 @@ async function testAll(servers, concurrency) {
 }
 
 // ---------------------------------------------------------------------
+// VPNGate / SSTP
+// ---------------------------------------------------------------------
+
+/**
+ * لیست عمومی VPNGate را می‌گیرد. فرمت خروجی این API یک CSV با دو خط
+ * هدر در ابتدا و یک خط "*" در انتهاست؛ فیلدها به ترتیب:
+ * HostName, IP, Score, Ping, Speed, CountryLong, CountryShort, ...
+ */
+async function fetchVpnGateServers() {
+  const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
+  const text = await res.text();
+
+  const lines = text.replace(/\r/g, "").split("\n").slice(2, -2);
+  const servers = [];
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const cols = line.split(",");
+      const hostName = cols[0];
+      const ip = cols[1];
+      const countryLong = cols[5] || "Unknown";
+      const address = ip || hostName;
+      if (!address) continue;
+
+      servers.push({
+        uri: address.trim(),
+        name: countryLong.trim(),
+        port: SSTP_PORT,
+        ping: -1,
+      });
+    } catch {
+      // خط بدشکل، رد می‌شویم
+    }
+  }
+  return servers;
+}
+
+/**
+ * دست‌دهی اولیه‌ی SSTP را روی یک اتصال TLS انجام می‌دهد. این احراز
+ * هویت PPP/CHAP کامل نیست — فقط تأیید می‌کند که یک سرویس SSTP واقعی
+ * (نه صرفاً یک پورت باز) پشت این آدرس در حال اجراست: اتصال TLS برقرار
+ * می‌شود، درخواست SSTP_DUPLEX_POST فرستاده می‌شود، و پاسخ باید
+ * "HTTP/1.1 200" باشد.
+ */
+function testSstp(host, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = "";
+    const start = Date.now();
+
+    const socket = tls.connect({
+      host,
+      port,
+      rejectUnauthorized: false, // سرورهای SSTP معمولاً گواهی self-signed دارند
+      timeout: timeoutMs,
+    });
+
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok ? Date.now() - start : null);
+    };
+
+    socket.on("secureConnect", () => {
+      const guid = "00000000-0000-0000-0000-000000000000";
+      const req =
+        `SSTP_DUPLEX_POST /sra_{${guid}} HTTP/1.1\r\n` +
+        `Content-Length: 18446744073709551615\r\n` +
+        `Host: ${host}\r\n` +
+        `SSTPCORRELATIONID: {${guid}}\r\n\r\n`;
+      socket.write(req);
+    });
+
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("latin1");
+      if (buffer.includes("\r\n\r\n") || buffer.length > 512) {
+        finish(/^HTTP\/1\.1 200/.test(buffer));
+      }
+    });
+
+    socket.on("timeout", () => finish(false));
+    socket.on("error", () => finish(false));
+    socket.on("close", () => finish(false));
+  });
+}
+
+async function testAllSstp(servers, concurrency) {
+  const healthy = [];
+  const tested = new Set();
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= servers.length) return;
+      const server = servers[i];
+
+      const ping = await testSstp(server.uri, server.port);
+      tested.add(dedupKey(server.uri));
+      if (ping != null) {
+        healthy.push({ ...server, ping });
+        console.log(`✅ [SSTP] سالم (${ping}ms): ${server.name} (${server.uri})`);
+      } else {
+        console.log(`❌ [SSTP] ناسالم: ${server.name} (${server.uri})`);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+  healthy.sort((a, b) => a.ping - b.ping);
+  return { healthy, tested };
+}
+
+// ---------------------------------------------------------------------
 // merge: فقط سرورهای واقعاً تست‌شده حذف/به‌روز می‌شوند
 // ---------------------------------------------------------------------
 function mergeResults(remoteList, testedUris, healthyResults) {
@@ -414,7 +542,7 @@ async function uploadToCloudflare(url, servers) {
     unique.map((s, i) => ({
       id: String(i),
       address: s.uri.trim(),
-      port: "v2ray",
+      port: s.port ?? "v2ray", // "v2ray" برای سرورهای V2Ray، عدد برای SSTP
       country: s.name,
       ping: s.ping ?? -1,
       icon: "https://raw.githubusercontent.com/alinarooi/icons/main/global.png",
@@ -455,17 +583,53 @@ async function main() {
     .slice(0, MAX_CANDIDATES);
 
   console.log(`تعداد یکتا برای تست: ${combined.length}`);
-  if (combined.length === 0) {
-    console.log("چیزی برای تست نیست، خروج.");
-    return;
+
+  let v2rayResult = { healthy: [], tested: new Set() };
+  if (combined.length > 0) {
+    console.log(`شروع تست V2Ray با ${CONCURRENCY} پروسه‌ی هم‌زمان...`);
+    v2rayResult = await testAll(combined, CONCURRENCY);
+    console.log(`نتیجه‌ی V2Ray: ${v2rayResult.healthy.length} سالم از ${v2rayResult.tested.size} تست‌شده.`);
+  } else {
+    console.log("هیچ کاندیدای V2Ray ای برای تست نبود.");
   }
 
-  console.log(`شروع تست با ${CONCURRENCY} پروسه‌ی هم‌زمان...`);
-  const { healthy, tested } = await testAll(combined, CONCURRENCY);
-  console.log(`نتیجه: ${healthy.length} سالم از ${tested.size} تست‌شده.`);
+  // ---------------------------------------------------------------
+  // مرحله‌ی دوم: VPNGate / SSTP — طبق درخواست، بعد از V2Ray اجرا می‌شود
+  // ---------------------------------------------------------------
+  console.log("در حال دریافت لیست VPNGate...");
+  const vpnGateServers = await fetchVpnGateServers().catch((e) => {
+    console.error("خطا در دریافت VPNGate:", e.message);
+    return [];
+  });
+  console.log(`VPNGate: ${vpnGateServers.length} سرور دریافت شد.`);
+
+  const seenSstp = new Set();
+  const sstpCandidates = vpnGateServers
+    .filter((s) => {
+      const key = dedupKey(s.uri);
+      if (seenSstp.has(key)) return false;
+      seenSstp.add(key);
+      return true;
+    })
+    .slice(0, MAX_SSTP_CANDIDATES);
+
+  let sstpResult = { healthy: [], tested: new Set() };
+  if (sstpCandidates.length > 0) {
+    console.log(`شروع تست SSTP با ${SSTP_CONCURRENCY} اتصال هم‌زمان روی ${sstpCandidates.length} کاندیدا...`);
+    sstpResult = await testAllSstp(sstpCandidates, SSTP_CONCURRENCY);
+    console.log(`نتیجه‌ی SSTP: ${sstpResult.healthy.length} سالم از ${sstpResult.tested.size} تست‌شده.`);
+  } else {
+    console.log("هیچ کاندیدای SSTP ای برای تست نبود.");
+  }
+
+  // ---------------------------------------------------------------
+  // ادغام نتایج هر دو مرحله و یک آپلود واحد
+  // ---------------------------------------------------------------
+  const healthy = [...v2rayResult.healthy, ...sstpResult.healthy];
+  const tested = new Set([...v2rayResult.tested, ...sstpResult.tested]);
 
   if (healthy.length === 0) {
-    console.log("هیچ سرور سالمی پیدا نشد — لیست کلودفلر دست‌نخورده می‌ماند.");
+    console.log("هیچ سرور سالمی (نه V2Ray نه SSTP) پیدا نشد — لیست کلودفلر دست‌نخورده می‌ماند.");
     return;
   }
 
