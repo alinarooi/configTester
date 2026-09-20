@@ -9,7 +9,7 @@ on:
 jobs:
   test-and-update:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -45,10 +45,10 @@ jobs:
           CF_UPDATE_URL: ${{ secrets.CF_UPDATE_URL }}
           GH_RAW_URL: "GH_RAW_URL: https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt
           XRAY_BIN: ${{ github.workspace }}/xray-bin/xray
-          MAX_CANDIDATES: "10000"
-          CONCURRENCY: "30"
+          MAX_CANDIDATES: "2000"
+          CONCURRENCY: "60"
           MIN_KEEP_RATIO: "0.5"
-          MAX_SSTP_CANDIDATES: "10000"
-          SSTP_CONCURRENCY: "30"
+          MAX_SSTP_CANDIDATES: "2000"
+          SSTP_CONCURRENCY: "60"
           SSTP_DEBUG: "1"
         run: node scripts/test-and-update-servers.mjs
