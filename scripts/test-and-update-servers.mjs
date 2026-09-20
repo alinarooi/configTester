@@ -449,10 +449,13 @@ function testSstp(host, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
       timeout: timeoutMs,
     });
 
-    const finish = (ok) => {
+    const finish = (ok, reason) => {
       if (settled) return;
       settled = true;
       socket.destroy();
+      if (!ok && process.env.SSTP_DEBUG === "1") {
+        console.log(`   [debug ${host}:${port}] ${reason}`);
+      }
       resolve(ok ? Date.now() - start : null);
     };
 
@@ -469,13 +472,14 @@ function testSstp(host, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
     socket.on("data", (chunk) => {
       buffer += chunk.toString("latin1");
       if (buffer.includes("\r\n\r\n") || buffer.length > 512) {
-        finish(/^HTTP\/1\.1 200/.test(buffer));
+        const firstLine = buffer.split("\r\n")[0];
+        finish(/^HTTP\/1\.1 200/.test(buffer), `پاسخ غیرمنتظره: "${firstLine}"`);
       }
     });
 
-    socket.on("timeout", () => finish(false));
-    socket.on("error", () => finish(false));
-    socket.on("close", () => finish(false));
+    socket.on("timeout", () => finish(false, "timeout (نه TLS نه پاسخی رسید)"));
+    socket.on("error", (err) => finish(false, `خطای اتصال/TLS: ${err.code || err.message}`));
+    socket.on("close", () => finish(false, "اتصال بدون پاسخ کامل بسته شد"));
   });
 }
 
