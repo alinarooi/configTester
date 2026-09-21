@@ -32,9 +32,6 @@ const MAX_CANDIDATES = Number(process.env.MAX_CANDIDATES || 300);
 const CONCURRENCY = Number(process.env.CONCURRENCY || 12);
 const CORE_WARMUP_MS = Number(process.env.CORE_WARMUP_MS || 400);
 
-// حداکثر پینگ مجاز به میلی‌ثانیه (۵۰۰۰ میلی‌ثانیه = ۵ ثانیه)
-const MAX_ALLOWED_PING_MS = Number(process.env.MAX_ALLOWED_PING_MS || 50000);
-
 const TEST_TIMEOUT_S = Number(process.env.TEST_TIMEOUT_S || 5);
 const TEST_URL = "https://www.gstatic.com/generate_204";
 const BASE_PORT = 20000;
@@ -718,8 +715,8 @@ async function testAll(
         dedupKey(server.uri)
       );
 
-      // فیلتر مستقیم پینگ بالای ۵۰۰۰ میلی‌ثانیه
-      if (ping != null && ping <= MAX_ALLOWED_PING_MS) {
+      // پذیرفتن تمامی سرورهای متصل شده بدون شرط سقف پینگ
+      if (ping != null) {
         healthy.push({
           ...server,
           ping,
@@ -727,10 +724,6 @@ async function testAll(
 
         console.log(
           `✅ سالم (${ping}ms): ${server.name}`
-        );
-      } else if (ping != null) {
-        console.log(
-          `❌ پینگ بالا (${ping}ms > ${MAX_ALLOWED_PING_MS}ms) - حذف شد: ${server.name}`
         );
       } else {
         console.log(
@@ -1551,8 +1544,8 @@ async function testAllSstp(
           );
       }
 
-      // فیلتر مستقیم پینگ بالای ۵۰۰۰ میلی‌ثانیه
-      if (ping != null && ping <= MAX_ALLOWED_PING_MS) {
+      // پذیرفتن تمامی سرورهای متصل شده بدون شرط سقف پینگ
+      if (ping != null) {
         healthy.push({
           ...server,
           ping,
@@ -1564,11 +1557,6 @@ async function testAllSstp(
             `${server.uri}:${server.port}`
           );
         }
-      } else if (ping != null) {
-        console.log(
-          `❌ [SSTP] پینگ بالا (${ping}ms > ${MAX_ALLOWED_PING_MS}ms) - حذف شد: ` +
-          `${server.uri}:${server.port}`
-        );
       } else {
         console.log(
           `❌ [SSTP] ناسالم: ` +
@@ -1670,13 +1658,13 @@ async function main() {
   // ۶. ادغام سرورهای سالم
   const finalHealthy = [...healthyV2ray, ...healthySstp];
 
-  // اگر سروری در لیست قبلی بوده اما در این نوبت تست نشده و پینگش زیر ۵۰۰۰ است، نگه‌داری می‌شود
+  // اگر سروری در لیست قبلی بوده اما در این نوبت تست نشده باشد، نگه‌داری می‌شود
   for (const s of currentServers) {
     const isV2ray = s.port === "v2ray";
     const key = isV2ray ? dedupKey(s.uri) : `${s.hostName || s.uri}:${s.port}`;
     const wasTested = isV2ray ? testedV2rayKeys.has(key) : testedSstpKeys.has(key);
 
-    if (!wasTested && (s.ping <= MAX_ALLOWED_PING_MS || s.ping === -1)) {
+    if (!wasTested) {
       finalHealthy.push(s);
     }
   }
