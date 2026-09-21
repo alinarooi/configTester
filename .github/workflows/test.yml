@@ -3,7 +3,6 @@ name: Test & Update Server List
 on:
   schedule:
     - cron: "0 * * * *"
-
   workflow_dispatch: {}
 
 jobs:
@@ -12,243 +11,109 @@ jobs:
     timeout-minutes: 60
 
     steps:
-
-      # ==========================================
-      # 1. Checkout
-      # ==========================================
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ==========================================
-      # 2. Setup Node.js
-      # ==========================================
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-
-      # ==========================================
-      # 3. Install SSTP / PPP / Network tools
-      # ==========================================
       - name: Install SSTP client
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
             sstp-client \
             ppp \
             iproute2 \
-            curl \
-            unzip
+            curl
 
-          echo ""
-          echo "======================================"
-          echo "SSTP version"
-          echo "======================================"
-
+          echo "=== SSTP version ==="
           sstpc --version
 
-          echo ""
-          echo "======================================"
-          echo "PPP binary BEFORE fix"
-          echo "======================================"
+          echo "=== PPP version ==="
+          pppd --version
 
-          ls -lah /usr/sbin/pppd || true
-          file /usr/sbin/pppd || true
-          stat /usr/sbin/pppd || true
+      - name: Fix PPP permissions
+        run: |
+          echo "=== Before fix ==="
+          ls -lah /usr/sbin/pppd
+          file /usr/sbin/pppd
+          stat /usr/sbin/pppd
 
-          echo ""
-          echo "======================================"
-          echo "Fix PPP permissions"
-          echo "======================================"
-
+          echo "=== Fixing permissions ==="
           sudo chmod 755 /usr/sbin/pppd
           sudo chown root:root /usr/sbin/pppd
 
-          echo ""
-          echo "======================================"
-          echo "PPP binary AFTER fix"
-          echo "======================================"
-
+          echo "=== After fix ==="
           ls -lah /usr/sbin/pppd
           file /usr/sbin/pppd
           stat /usr/sbin/pppd
 
-          echo ""
-          echo "======================================"
-          echo "Testing pppd"
-          echo "======================================"
-
+          echo "=== Testing pppd ==="
           sudo -n /usr/sbin/pppd --version || true
 
-
-      # ==========================================
-      # 4. Deep PPP diagnostics
-      # ==========================================
-      - name: Deep debug PPP
+      - name: Debug SSTP / PPP
         run: |
-          echo "======================================"
-          echo "PPP FILE"
-          echo "======================================"
+          echo "=== sstpc location ==="
+          which sstpc
 
+          echo "=== sstpc permissions ==="
+          ls -lah "$(which sstpc)"
+
+          echo "=== pppd location ==="
+          which pppd
+
+          echo "=== pppd permissions ==="
           ls -lah /usr/sbin/pppd
-          file /usr/sbin/pppd
-          stat /usr/sbin/pppd
 
-          echo ""
-          echo "======================================"
-          echo "MOUNT INFORMATION"
-          echo "======================================"
+          echo "=== sudo test ==="
+          sudo -n true
+          echo "sudo exit code: $?"
 
-          mount | grep -E ' / |usr' || true
-
-          echo ""
-          echo "======================================"
-          echo "PPP CAPABILITIES"
-          echo "======================================"
-
-          getcap /usr/sbin/pppd || true
-
-          echo ""
-          echo "======================================"
-          echo "APPARMOR"
-          echo "======================================"
-
-          sudo aa-status 2>/dev/null || true
-
-          echo ""
-          echo "======================================"
-          echo "DIRECT EXECUTION"
-          echo "======================================"
-
-          /usr/sbin/pppd --version || true
-
-          echo ""
-          echo "======================================"
-          echo "SUDO EXECUTION"
-          echo "======================================"
-
+          echo "=== pppd execute test ==="
           sudo -n /usr/sbin/pppd --version || true
 
-          echo ""
-          echo "======================================"
-          echo "PPP LOCATION"
-          echo "======================================"
-
-          which pppd || true
-          command -v pppd || true
-
-          echo ""
-          echo "======================================"
-          echo "PPP CONFIG"
-          echo "======================================"
-
-          ls -lah /etc/ppp || true
-
-          echo ""
-          echo "======================================"
-          echo "CURRENT NETWORK"
-          echo "======================================"
-
-          ip addr || true
-          ip route || true
-
-
-      # ==========================================
-      # 5. Download Xray-core
-      # ==========================================
       - name: Download Xray-core
         run: |
-          echo "Downloading Xray-core..."
-
           curl -fL \
             -o xray.zip \
             https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-
-          mkdir -p xray-bin
 
           unzip -o xray.zip -d xray-bin
 
           chmod +x xray-bin/xray
 
-          echo ""
-          echo "======================================"
-          echo "Xray version"
-          echo "======================================"
-
           xray-bin/xray version
 
-
-      # ==========================================
-      # 6. Run server tester
-      # ==========================================
       - name: Run tester
         env:
-
-          # --------------------------------------
-          # Cloudflare
-          # --------------------------------------
           CF_ALL_URL: ${{ secrets.CF_ALL_URL }}
           CF_UPDATE_URL: ${{ secrets.CF_UPDATE_URL }}
 
-          # --------------------------------------
-          # Source server list
-          # --------------------------------------
           GH_RAW_URL: "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt"
 
-          # --------------------------------------
-          # Xray
-          # --------------------------------------
           XRAY_BIN: ${{ github.workspace }}/xray-bin/xray
 
-          # --------------------------------------
-          # V2Ray testing
-          # --------------------------------------
           MAX_CANDIDATES: "2000"
           CONCURRENCY: "60"
+
           MIN_KEEP_RATIO: "0.5"
 
-          # --------------------------------------
-          # SSTP testing
-          # --------------------------------------
           MAX_SSTP_CANDIDATES: "2000"
-
-          # فقط یک SSTP همزمان
-          # چون PPP interface و routing سیستم
-          # ممکن است با تست همزمان تداخل کند
           SSTP_CONCURRENCY: "1"
 
-          # فعال کردن تست واقعی SSTP
           SSTP_REAL_TUNNEL: "1"
 
-          # --------------------------------------
-          # VPNGate credentials
-          # --------------------------------------
           SSTP_USERNAME: "vpn"
           SSTP_PASSWORD: "vpn"
 
-          # --------------------------------------
-          # SSTP timeout
-          # --------------------------------------
-          SSTP_TIMEOUT_MS: "3000"
+          SSTP_TIMEOUT_MS: "30000"
 
-          # --------------------------------------
-          # SSTP debug
-          # --------------------------------------
-          SSTP_DEBUG: "1"
-
-          # --------------------------------------
-          # Test internet THROUGH PPP
-          # --------------------------------------
           SSTP_INTERNET_TEST: "1"
-
           SSTP_TEST_URL: "https://www.gstatic.com/generate_204"
 
-        run: |
-          echo "======================================"
-          echo "Starting server tester"
-          echo "======================================"
+          SSTP_DEBUG: "1"
 
+        run: |
           node scripts/test-and-update-servers.mjs
