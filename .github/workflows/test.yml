@@ -2,7 +2,7 @@ name: Test & Update Server List
 
 on:
   schedule:
-    - cron: "0 * * * *"
+  - cron: "0 */4 * * *"
 
   workflow_dispatch: {}
 
@@ -213,7 +213,7 @@ jobs:
           # --------------------------------------
           # SSTP testing
           # --------------------------------------
-          MAX_SSTP_CANDIDATES: "2000"
+          MAX_SSTP_CANDIDATES: "300"
 
           # فقط یک SSTP همزمان
           # چون PPP interface و routing سیستم
@@ -232,7 +232,7 @@ jobs:
           # --------------------------------------
           # SSTP timeout
           # --------------------------------------
-          SSTP_TIMEOUT_MS: "30000"
+          SSTP_TIMEOUT_MS: "4000"
 
           # --------------------------------------
           # SSTP debug
