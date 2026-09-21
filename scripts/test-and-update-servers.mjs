@@ -410,6 +410,60 @@ async function fetchVpnGateServers() {
   return servers;
 }
 
+const SSTP_CONCURRENCY = 8; // حداکثر ۸ اتصال هم‌زمان
+
+function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = "";
+    const start = Date.now();
+
+    const host = typeof serverOrHost === "object" ? serverOrHost.uri : serverOrHost;
+    const domain = typeof serverOrHost === "object" ? serverOrHost.domain || host : host;
+
+    const socket = tls.connect({
+      host,
+      port,
+      servername: domain, // تنظیم SNI بر اساس دامین
+      rejectUnauthorized: false,
+      minVersion: "TLSv1",
+      timeout: timeoutMs,
+    });
+
+    const finish = (ok, reason) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (!ok && process.env.SSTP_DEBUG === "1") {
+        console.log(`    [debug ${host}:${port}] ${reason}`);
+      }
+      resolve(ok ? Date.now() - start : null);
+    };
+
+    socket.on("secureConnect", () => {
+      // استفاده از domain در Host header به جای IP
+      const req =
+        `SSTP_DUPLEX_POST /sra_{${SSTP_GUID}}/ HTTP/1.1\r\n` +
+        `Host: ${domain}\r\n` +
+        `Content-Length: 18446744073709551615\r\n` +
+        `User-Agent: SSTP Client\r\n\r\n`;
+      socket.write(req);
+    });
+
+    socket.on("data", (chunk) => {
+      buffer += chunk.toString("latin1");
+      if (buffer.includes("\r\n\r\n") || buffer.length > 512) {
+        const firstLine = buffer.split("\r\n")[0];
+        finish(/^HTTP\/1\.[01] 200/.test(buffer), `پاسخ غیرمنتظره: "${firstLine}"`);
+      }
+    });
+
+    socket.on("timeout", () => finish(false, "تایم‌اوت در برقراری TLS یا دریافت پاسخ"));
+    socket.on("error", (err) => finish(false, `خطای اتصال/TLS: ${err.code || err.message}`));
+    socket.on("close", () => finish(false, "اتصال قبل از دریافت پاسخ بسته شد"));
+  });
+}
+
 async function testAllSstp(servers, concurrency) {
   const healthy = [];
   const tested = new Set();
