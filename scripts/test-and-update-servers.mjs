@@ -38,6 +38,7 @@ const BASE_PORT = 20000;
 // --- VPNGate / SSTP ---
 const VPNGATE_API_URL = "http://www.vpngate.net/api/iphone/";
 const SSTP_PORT = 443;
+const SSTP_GUID = "386A22A6-4C2E-49A2-8926-2E10E5A73711"; // GUID استاندارد MS-SSTP
 const MAX_SSTP_CANDIDATES = Number(process.env.MAX_SSTP_CANDIDATES || 200);
 const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 30);
 const SSTP_TIMEOUT_MS = Number(process.env.SSTP_TIMEOUT_MS || 6000);
@@ -70,9 +71,6 @@ async function fetchCloudflareServers(url) {
     .map((o, i) => ({
       uri: String(o.address || "").trim(),
       name: String(o.country || `کلودفلر-${i + 1}`),
-      // port را عیناً از روی داده‌ی موجود نگه می‌داریم: یا رشته‌ی
-      // "v2ray" (سرورهای V2Ray) یا یک عدد (سرورهای SSTP). این‌طور
-      // رکوردهای تست‌نشده هنگام merge نوع‌شان را از دست نمی‌دهند.
       port: o.port === "v2ray" ? "v2ray" : Number(o.port) || "v2ray",
       ping: -1,
     }))
@@ -271,7 +269,6 @@ function buildShadowsocks(link) {
   };
 }
 
-// طبق مستندات رسمی xtls.github.io: پروتکل "hysteria" است، نه "hysteria2"
 function buildHysteria(link) {
   const u = new URL(link);
   const auth = u.username ? decodeURIComponent(u.username) : "";
@@ -330,6 +327,11 @@ async function testOne(server, port) {
 
   try {
     await sleep(CORE_WARMUP_MS);
+
+    // بررسی زنده بودن پروسه Xray قبل از تست
+    if (child.exitCode !== null) {
+      return null;
+    }
 
     const start = Date.now();
     const { stdout } = await execFileP("curl", [
@@ -395,57 +397,61 @@ async function testAll(servers, concurrency) {
 // ---------------------------------------------------------------------
 
 /**
- * لیست عمومی VPNGate را می‌گیرد. فرمت خروجی این API یک CSV با دو خط
- * هدر در ابتدا و یک خط "*" در انتهاست؛ فیلدها به ترتیب:
- * HostName, IP, Score, Ping, Speed, CountryLong, CountryShort, ...
+ * دریافت لیست VPNGate با فیلتر هدرها و تنظیم دامنه SNI
  */
 async function fetchVpnGateServers() {
   const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
   const text = await res.text();
 
-  const lines = text.replace(/\r/g, "").split("\n").slice(2, -2);
+  const lines = text.replace(/\r/g, "").split("\n");
   const servers = [];
 
   for (const line of lines) {
-    if (!line.trim()) continue;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("*")) continue;
+
     try {
-      const cols = line.split(",");
+      const cols = trimmed.split(",");
       const hostName = cols[0];
       const ip = cols[1];
       const countryLong = cols[5] || "Unknown";
-      const address = ip || hostName;
-      if (!address) continue;
+
+      if (!ip && !hostName) continue;
+
+      const domain = hostName ? `${hostName}.opengw.net` : ip;
+      const address = ip || domain;
 
       servers.push({
         uri: address.trim(),
+        domain: domain.trim(),
         name: countryLong.trim(),
         port: SSTP_PORT,
         ping: -1,
       });
     } catch {
-      // خط بدشکل، رد می‌شویم
+      // خط نادرست
     }
   }
   return servers;
 }
 
 /**
- * دست‌دهی اولیه‌ی SSTP را روی یک اتصال TLS انجام می‌دهد. این احراز
- * هویت PPP/CHAP کامل نیست — فقط تأیید می‌کند که یک سرویس SSTP واقعی
- * (نه صرفاً یک پورت باز) پشت این آدرس در حال اجراست: اتصال TLS برقرار
- * می‌شود، درخواست SSTP_DUPLEX_POST فرستاده می‌شود، و پاسخ باید
- * "HTTP/1.1 200" باشد.
+ * تست دست‌دهی استاندارد SSTP با GUID مایکروسافت و ارسال SNI
  */
-function testSstp(host, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
+function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let settled = false;
     let buffer = "";
     const start = Date.now();
 
+    const host = typeof serverOrHost === "object" ? serverOrHost.uri : serverOrHost;
+    const domain = typeof serverOrHost === "object" ? serverOrHost.domain || host : host;
+
     const socket = tls.connect({
       host,
       port,
-      rejectUnauthorized: false, // سرورهای SSTP معمولاً گواهی self-signed دارند
+      servername: domain,
+      rejectUnauthorized: false,
       timeout: timeoutMs,
     });
 
@@ -454,18 +460,17 @@ function testSstp(host, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
       settled = true;
       socket.destroy();
       if (!ok && process.env.SSTP_DEBUG === "1") {
-        console.log(`   [debug ${host}:${port}] ${reason}`);
+        console.log(`    [debug ${host}:${port}] ${reason}`);
       }
       resolve(ok ? Date.now() - start : null);
     };
 
     socket.on("secureConnect", () => {
-      const guid = "00000000-0000-0000-0000-000000000000";
       const req =
-        `SSTP_DUPLEX_POST /sra_{${guid}} HTTP/1.1\r\n` +
+        `SSTP_DUPLEX_POST /sra_{${SSTP_GUID}}/ HTTP/1.1\r\n` +
         `Content-Length: 18446744073709551615\r\n` +
-        `Host: ${host}\r\n` +
-        `SSTPCORRELATIONID: {${guid}}\r\n\r\n`;
+        `Host: ${domain}\r\n` +
+        `User-Agent: SSTP Client\r\n\r\n`;
       socket.write(req);
     });
 
@@ -477,9 +482,9 @@ function testSstp(host, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
       }
     });
 
-    socket.on("timeout", () => finish(false, "timeout (نه TLS نه پاسخی رسید)"));
+    socket.on("timeout", () => finish(false, "تایم‌اوت در برقراری TLS یا دریافت پاسخ"));
     socket.on("error", (err) => finish(false, `خطای اتصال/TLS: ${err.code || err.message}`));
-    socket.on("close", () => finish(false, "اتصال بدون پاسخ کامل بسته شد"));
+    socket.on("close", () => finish(false, "اتصال قبل از دریافت پاسخ بسته شد"));
   });
 }
 
@@ -494,7 +499,7 @@ async function testAllSstp(servers, concurrency) {
       if (i >= servers.length) return;
       const server = servers[i];
 
-      const ping = await testSstp(server.uri, server.port);
+      const ping = await testSstp(server, server.port);
       tested.add(dedupKey(server.uri));
       if (ping != null) {
         healthy.push({ ...server, ping });
@@ -546,7 +551,7 @@ async function uploadToCloudflare(url, servers) {
     unique.map((s, i) => ({
       id: String(i),
       address: s.uri.trim(),
-      port: s.port ?? "v2ray", // "v2ray" برای سرورهای V2Ray، عدد برای SSTP
+      port: s.port ?? "v2ray",
       country: s.name,
       ping: s.ping ?? -1,
       icon: "https://raw.githubusercontent.com/alinarooi/icons/main/global.png",
@@ -598,7 +603,7 @@ async function main() {
   }
 
   // ---------------------------------------------------------------
-  // مرحله‌ی دوم: VPNGate / SSTP — طبق درخواست، بعد از V2Ray اجرا می‌شود
+  // مرحله‌ی دوم: VPNGate / SSTP
   // ---------------------------------------------------------------
   console.log("در حال دریافت لیست VPNGate...");
   const vpnGateServers = await fetchVpnGateServers().catch((e) => {
@@ -627,7 +632,7 @@ async function main() {
   }
 
   // ---------------------------------------------------------------
-  // ادغام نتایج هر دو مرحله و یک آپلود واحد
+  // ادغام نتایج و آپلود
   // ---------------------------------------------------------------
   const healthy = [...v2rayResult.healthy, ...sstpResult.healthy];
   const tested = new Set([...v2rayResult.tested, ...sstpResult.tested]);
@@ -641,16 +646,13 @@ async function main() {
   const freshRemote = await fetchCloudflareServers(CF_ALL_URL).catch(() => cfServers);
   const merged = mergeResults(freshRemote, tested, healthy);
 
-  // محافظ در برابر کوچک شدن ناگهانی و مخرب لیست (چون Worker خودش
-  // چنین چکی ندارد و جایگزینی را بدون سؤال قبول می‌کند)
   if (freshRemote.length > 0) {
     const ratio = merged.length / freshRemote.length;
     if (ratio < MIN_KEEP_RATIO) {
       console.error(
         `⚠️ آپلود متوقف شد: لیست نهایی (${merged.length}) کمتر از ` +
         `${Math.round(MIN_KEEP_RATIO * 100)}% لیست فعلی (${freshRemote.length}) است. ` +
-        `این می‌تواند نشانه‌ی یک مشکل شبکه‌ی runner یا باگ باشد، نه واقعاً ` +
-        `خراب بودن این‌همه سرور. برای عبور از این محافظ، MIN_KEEP_RATIO را کم کنید.`
+        `این می‌تواند نشانه‌ی یک مشکل شبکه‌ی runner یا باگ باشد.`
       );
       process.exit(1);
     }
