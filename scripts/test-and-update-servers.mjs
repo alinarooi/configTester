@@ -373,12 +373,12 @@ async function testAll(servers, concurrency) {
 
 // ---------------------------------------------------------------------
 // VPNGate / SSTP
-// ---------------------------------------------------------------------
+//---------------------------------------------------------------------
 
+// ۱. استخراج دامین واقعی VPNGate برای ارسال در Host Header
 async function fetchVpnGateServers() {
   const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
   const text = await res.text();
-
   const lines = text.replace(/\r/g, "").split("\n");
   const servers = [];
 
@@ -388,78 +388,58 @@ async function fetchVpnGateServers() {
 
     try {
       const cols = trimmed.split(",");
-      const hostName = cols[0];
+      const hostName = cols[0]; // مانند vg12345678
       const ip = cols[1];
       const countryLong = cols[5] || "Unknown";
 
-      if (!ip && !hostName) continue;
+      if (!ip) continue;
 
-      const domain = hostName ? `${hostName}.opengw.net` : ip;
-      const address = ip || domain;
+      // ساخت دامین دقیق opengw.net برای SNI و Host Header
+      const domain = hostName ? `${hostName.toLowerCase()}.opengw.net` : ip;
 
       servers.push({
-        uri: address.trim(),
+        uri: ip.trim(),
         domain: domain.trim(),
         name: countryLong.trim(),
         port: SSTP_PORT,
         ping: -1,
       });
-    } catch {
-      // خط نادرست
-    }
+    } catch {}
   }
   return servers;
 }
+// ۱. استخراج دامین واقعی VPNGate برای ارسال در Host Header
+async function fetchVpnGateServers() {
+  const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
+  const text = await res.text();
+  const lines = text.replace(/\r/g, "").split("\n");
+  const servers = [];
 
-function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
-  return new Promise((resolve) => {
-    let settled = false;
-    let buffer = "";
-    const start = Date.now();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("*")) continue;
 
-    const host = typeof serverOrHost === "object" ? serverOrHost.uri : serverOrHost;
-    const domain = typeof serverOrHost === "object" ? serverOrHost.domain || host : host;
+    try {
+      const cols = trimmed.split(",");
+      const hostName = cols[0]; // مانند vg12345678
+      const ip = cols[1];
+      const countryLong = cols[5] || "Unknown";
 
-    const socket = tls.connect({
-      host,
-      port,
-      servername: domain,
-      rejectUnauthorized: false,
-      minVersion: "TLSv1",
-      timeout: timeoutMs,
-    });
+      if (!ip) continue;
 
-    const finish = (ok, reason) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      if (!ok && process.env.SSTP_DEBUG === "1") {
-        console.log(`    [debug ${host}:${port}] ${reason}`);
-      }
-      resolve(ok ? Date.now() - start : null);
-    };
+      // ساخت دامین دقیق opengw.net برای SNI و Host Header
+      const domain = hostName ? `${hostName.toLowerCase()}.opengw.net` : ip;
 
-    socket.on("secureConnect", () => {
-      const req =
-        `SSTP_DUPLEX_POST /sra_{${SSTP_GUID}}/ HTTP/1.1\r\n` +
-        `Host: ${domain}\r\n` +
-        `Content-Length: 18446744073709551615\r\n` +
-        `User-Agent: SSTP Client\r\n\r\n`;
-      socket.write(req);
-    });
-
-    socket.on("data", (chunk) => {
-      buffer += chunk.toString("latin1");
-      if (buffer.includes("\r\n\r\n") || buffer.length > 512) {
-        const firstLine = buffer.split("\r\n")[0];
-        finish(/^HTTP\/1\.[01] 200/.test(buffer), `پاسخ غیرمنتظره: "${firstLine}"`);
-      }
-    });
-
-    socket.on("timeout", () => finish(false, "تایم‌اوت در برقراری TLS یا دریافت پاسخ"));
-    socket.on("error", (err) => finish(false, `خطای اتصال/TLS: ${err.code || err.message}`));
-    socket.on("close", () => finish(false, "اتصال قبل از دریافت پاسخ بسته شد"));
-  });
+      servers.push({
+        uri: ip.trim(),
+        domain: domain.trim(),
+        name: countryLong.trim(),
+        port: SSTP_PORT,
+        ping: -1,
+      });
+    } catch {}
+  }
+  return servers;
 }
 
 async function testAllSstp(servers, concurrency) {
