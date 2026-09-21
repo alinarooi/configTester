@@ -31,7 +31,11 @@ const XRAY_BIN = process.env.XRAY_BIN || "./xray";
 const MAX_CANDIDATES = Number(process.env.MAX_CANDIDATES || 300);
 const CONCURRENCY = Number(process.env.CONCURRENCY || 12);
 const CORE_WARMUP_MS = Number(process.env.CORE_WARMUP_MS || 400);
-const TEST_TIMEOUT_S = Number(process.env.TEST_TIMEOUT_S || 6);
+
+// حداکثر پینگ مجاز به میلی‌ثانیه (۵۰۰۰ میلی‌ثانیه = ۵ ثانیه)
+const MAX_ALLOWED_PING_MS = Number(process.env.MAX_ALLOWED_PING_MS || 5000);
+
+const TEST_TIMEOUT_S = Number(process.env.TEST_TIMEOUT_S || 5);
 const TEST_URL = "https://www.gstatic.com/generate_204";
 const BASE_PORT = 20000;
 
@@ -77,7 +81,7 @@ async function fetchCloudflareServers(url) {
           ? "v2ray"
           : Number(o.port) || "v2ray",
 
-      ping: -1,
+      ping: Number(o.ping) || -1,
     }))
     .filter((s) => s.uri.length > 0);
 }
@@ -485,7 +489,6 @@ function buildShadowsocks(link) {
   };
 }
 
-// طبق مستندات رسمی xtls.github.io
 function buildHysteria(link) {
   const u = new URL(link);
 
@@ -715,7 +718,8 @@ async function testAll(
         dedupKey(server.uri)
       );
 
-      if (ping != null) {
+      // فیلتر مستقیم پینگ بالای ۵۰۰۰ میلی‌ثانیه
+      if (ping != null && ping <= MAX_ALLOWED_PING_MS) {
         healthy.push({
           ...server,
           ping,
@@ -723,6 +727,10 @@ async function testAll(
 
         console.log(
           `✅ سالم (${ping}ms): ${server.name}`
+        );
+      } else if (ping != null) {
+        console.log(
+          `❌ پینگ بالا (${ping}ms > ${MAX_ALLOWED_PING_MS}ms) - حذف شد: ${server.name}`
         );
       } else {
         console.log(
@@ -774,7 +782,7 @@ const SSTP_CONCURRENCY =
 const SSTP_TIMEOUT_MS =
   Number(
     process.env.SSTP_TIMEOUT_MS ||
-    30000
+    5000
   );
 
 const SSTP_USERNAME =
@@ -866,10 +874,6 @@ async function fetchVpnGateServers() {
           hostName
         )
       ) {
-        console.log(
-          `⚠️ hostname نامعتبر VPNGate: ${hostName}`
-        );
-
         continue;
       }
 
@@ -1019,19 +1023,6 @@ async function fetchVpnGateServers() {
     );
   }
 
-  console.log(
-    `VPNGate parser: ${unique.length} سرور SSTP معتبر استخراج شد.`
-  );
-
-  for (
-    const server
-    of unique.slice(0, 5)
-  ) {
-    console.log(
-      `    [VPNGate] ${server.hostName}:${server.port} (${server.ip})`
-    );
-  }
-
   return unique;
 }
 
@@ -1065,30 +1056,6 @@ async function testSstpReal(
       }
 
       settled = true;
-
-      if (
-        process.env.SSTP_DEBUG === "1"
-      ) {
-        if (ok) {
-          console.log(
-            `    [SSTP debug] ${host}:${port} -> ${reason}`
-          );
-        } else {
-          const shortLog =
-            output
-              .replace(/\n+/g, " | ")
-              .slice(-1200);
-
-          console.log(
-            `    [SSTP debug] ${host}:${port} -> ${reason}` +
-            (
-              shortLog
-                ? ` | ${shortLog}`
-                : ""
-            )
-          );
-        }
-      }
 
       if (child?.pid) {
         try {
@@ -1359,14 +1326,6 @@ async function testSstpReal(
           const elapsed =
             Date.now() - started;
 
-          console.log(
-            `✅ [SSTP REAL] سالم (${elapsed}ms): ` +
-            `${host}:${port} ` +
-            `PPP=${pppInterface}, ` +
-            `HTTP=${code}, ` +
-            `Internet=${Date.now() - curlStart}ms`
-          );
-
           return await finish(
             true,
             `PPP=${pppInterface}, HTTP=${code}`
@@ -1396,11 +1355,6 @@ async function testSstpReal(
     );
   }
 }
-
-// ---------------------------------------------------------------------
-// تست قدیمی TLS/SSTP
-// فقط زمانی استفاده می‌شود که SSTP_REAL_TUNNEL=0 باشد.
-// ---------------------------------------------------------------------
 
 function testSstpHandshake(
   host,
@@ -1439,15 +1393,6 @@ function testSstpHandshake(
           settled = true;
 
           socket.destroy();
-
-          if (
-            !ok &&
-            process.env.SSTP_DEBUG === "1"
-          ) {
-            console.log(
-              `    [SSTP debug] ${host}:${port} ${reason}`
-            );
-          }
 
           resolve(
             ok
@@ -1586,12 +1531,7 @@ async function testAllSstp(
 
       console.log(
         `🔎 [SSTP] تست ${i + 1}/${servers.length}: ` +
-        `${server.uri}:${server.port}` +
-        `${
-          server.ip
-            ? ` (${server.ip})`
-            : ""
-        }`
+        `${server.uri}:${server.port}`
       );
 
       let ping;
@@ -1611,7 +1551,8 @@ async function testAllSstp(
           );
       }
 
-      if (ping != null) {
+      // فیلتر مستقیم پینگ بالای ۵۰۰۰ میلی‌ثانیه
+      if (ping != null && ping <= MAX_ALLOWED_PING_MS) {
         healthy.push({
           ...server,
           ping,
@@ -1623,6 +1564,11 @@ async function testAllSstp(
             `${server.uri}:${server.port}`
           );
         }
+      } else if (ping != null) {
+        console.log(
+          `❌ [SSTP] پینگ بالا (${ping}ms > ${MAX_ALLOWED_PING_MS}ms) - حذف شد: ` +
+          `${server.uri}:${server.port}`
+        );
       } else {
         console.log(
           `❌ [SSTP] ناسالم: ` +
@@ -1724,13 +1670,13 @@ async function main() {
   // ۶. ادغام سرورهای سالم
   const finalHealthy = [...healthyV2ray, ...healthySstp];
 
-  // اگر سروری در لیست قبلی بوده اما در این نوبت تست نشده، آن را نگه می‌داریم
+  // اگر سروری در لیست قبلی بوده اما در این نوبت تست نشده و پینگش زیر ۵۰۰۰ است، نگه‌داری می‌شود
   for (const s of currentServers) {
     const isV2ray = s.port === "v2ray";
     const key = isV2ray ? dedupKey(s.uri) : `${s.hostName || s.uri}:${s.port}`;
     const wasTested = isV2ray ? testedV2rayKeys.has(key) : testedSstpKeys.has(key);
 
-    if (!wasTested) {
+    if (!wasTested && (s.ping <= MAX_ALLOWED_PING_MS || s.ping === -1)) {
       finalHealthy.push(s);
     }
   }
@@ -1742,38 +1688,11 @@ async function main() {
     const minRequired = Math.floor(currentServers.length * MIN_KEEP_RATIO);
     if (finalHealthy.length < minRequired) {
       console.error(
-        `❌ تعداد سرورهای سالم (${finalHealthy.length}) کمتر از حد مجاز (${minRequired}) است. به روزرسانی لغو شد.`
+        `❌ تعداد سرورهای سالم (${finalHealthy.length}) کمتر از حد مجاز (${minRequired}) است. به‌روزرسانی لغو شد.`
       );
       process.exit(1);
     }
   }
-
-  // ۸. مپ کردن داده‌ها به فرمت خروجی Cloudflare Worker
-  const payload = finalHealthy.map((s) => ({
-    address: s.uri,
-    country: s.name,
-    port: s.port,
-    ping: s.ping,
-  }));
-
-  // ۹. ارسال لیست به Worker
-  console.log("📤 در حال ارسال داده‌های جدید به Cloudflare Worker...");
-  const updateRes = await fetch(CF_UPDATE_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!updateRes.ok) {
-    throw new Error(`خطا در آپدیت Worker: کد HTTP ${updateRes.status}`);
-  }
-
-  console.log("✅ به‌روزرسانی با موفقیت انجام شد!");
 }
 
-main().catch((err) => {
-  console.error("💥 خطای غیرمنتظره در اجرای اسکریپت:", err);
-  process.exit(1);
-});
+main();
