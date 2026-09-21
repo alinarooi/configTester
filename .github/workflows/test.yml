@@ -49,6 +49,6 @@ jobs:
           CONCURRENCY: "60"
           MIN_KEEP_RATIO: "0.5"
           MAX_SSTP_CANDIDATES: "2000"
-          SSTP_CONCURRENCY: "60"
+          SSTP_CONCURRENCY: "1"
           SSTP_DEBUG: "1"
         run: node scripts/test-and-update-servers.mjs
