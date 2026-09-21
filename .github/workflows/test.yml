@@ -43,7 +43,7 @@ jobs:
         env:
           CF_ALL_URL: ${{ secrets.CF_ALL_URL }}
           CF_UPDATE_URL: ${{ secrets.CF_UPDATE_URL }}
-          GH_RAW_URL: "GH_RAW_URL: https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt
+          GH_RAW_URL: "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt"
           XRAY_BIN: ${{ github.workspace }}/xray-bin/xray
           MAX_CANDIDATES: "2000"
           CONCURRENCY: "60"
