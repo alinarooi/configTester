@@ -218,10 +218,10 @@ jobs:
           # فقط یک SSTP همزمان
           # چون PPP interface و routing سیستم
           # ممکن است با تست همزمان تداخل کند
-          SSTP_CONCURRENCY: "1"
+          SSTP_CONCURRENCY: "3"
 
           # فعال کردن تست واقعی SSTP
-          SSTP_REAL_TUNNEL: "1"
+          SSTP_REAL_TUNNEL: "3"
 
           # --------------------------------------
           # VPNGate credentials
@@ -242,7 +242,7 @@ jobs:
           # --------------------------------------
           # Test internet THROUGH PPP
           # --------------------------------------
-          SSTP_INTERNET_TEST: "1"
+          SSTP_INTERNET_TEST: "3"
 
           SSTP_TEST_URL: "https://www.gstatic.com/generate_204"
 
