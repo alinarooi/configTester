@@ -375,6 +375,7 @@ async function testAll(servers, concurrency) {
 // VPNGate / SSTP (دریافت و تست با آدرس دامنه و پورت)
 // ---------------------------------------------------------------------
 
+// ۱. استخراج هم‌زمان IP (برای اتصال سریع) و Domain (برای SNI و Host Header)
 async function fetchVpnGateServers() {
   const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
   const text = await res.text();
@@ -388,41 +389,45 @@ async function fetchVpnGateServers() {
 
     try {
       const cols = trimmed.split(",");
-      const hostName = cols[0]; // نام هاست مانند vg12345678
-      const ip = cols[1];
-      const countryLong = cols[5] || "Unknown";
+      const hostName = cols[0] ? cols[0].trim().toLowerCase() : "";
+      const ip = cols[1] ? cols[1].trim() : "";
+      const countryLong = cols[5] ? cols[5].trim() : "Unknown";
 
-      if (!hostName && !ip) continue;
+      if (!ip) continue;
 
-      // ساخت آدرس دامنه opengw.net جهت تست و ذخیره به جای IP
-      const domainAddress = hostName ? `${hostName.toLowerCase()}.opengw.net` : ip.trim();
+      // ساخت آدرس دامنه رسمی VPNGate
+      const domain = hostName ? `${hostName}.opengw.net` : ip;
 
       servers.push({
-        uri: domainAddress, // آدرس دامنه
-        name: countryLong.trim(),
+        ip: ip,             // استفاده برای اتصال مستقیم بدون نیاز به DNS
+        domain: domain,     // استفاده برای TLS SNI و Host Header
+        uri: domain,        // آدرسی که در کلودفلر ذخیره می‌شود
+        name: countryLong,
         port: SSTP_PORT,
         ping: -1,
       });
     } catch {
-      // خط نادرست
+      // خطای پارس لاین
     }
   }
   return servers;
 }
 
-function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
+// ۲. تست SSTP با اتصال مستقیم به IP و ارسال SNI/Host بر اساس دامنه
+function testSstp(server, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let settled = false;
     let buffer = "";
     const start = Date.now();
 
-    const hostAddress = typeof serverOrHost === "object" ? serverOrHost.uri : serverOrHost;
-    const targetPort = typeof serverOrHost === "object" ? (serverOrHost.port || port) : port;
+    const ipAddress = server.ip || server.uri;
+    const domainAddress = server.domain || server.uri;
+    const targetPort = server.port || port;
 
     const socket = tls.connect({
-      host: hostAddress, // اتصال به آدرس دامنه
-      port: targetPort,  // پورت target
-      servername: hostAddress, // SNI بر اساس آدرس دامنه
+      host: ipAddress,            // اتصال مستقیم به IP (حذف گلوگاه DNS)
+      port: targetPort,
+      servername: domainAddress,  // تنظیم SNI لایه TLS روی دامنه
       rejectUnauthorized: false,
       minVersion: "TLSv1",
       timeout: timeoutMs,
@@ -432,17 +437,19 @@ function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
       if (settled) return;
       settled = true;
       socket.destroy();
-      if (!ok && process.env.SSTP_DEBUG === "1") {
-        console.log(`    [debug ${hostAddress}:${targetPort}] ${reason}`);
+      
+      // اگر SSTP_DEBUG=1 باشد، دلیل رد شدن هر سرور چاپ می‌شود
+      if (process.env.SSTP_DEBUG === "1") {
+        console.log(`    [SSTP Debug] ${domainAddress} (${ipAddress}:${targetPort}) -> ${ok ? "OK" : "FAIL"}: ${reason}`);
       }
       resolve(ok ? Date.now() - start : null);
     };
 
     socket.on("secureConnect", () => {
-      // ارسال آدرس دامنه در Host Header
+      // ارسال درخواست SSTP با Host Header بر اساس دامنه
       const req =
         `SSTP_DUPLEX_POST /sra_{${SSTP_GUID}}/ HTTP/1.1\r\n` +
-        `Host: ${hostAddress}\r\n` +
+        `Host: ${domainAddress}\r\n` +
         `Content-Length: 18446744073709551615\r\n` +
         `User-Agent: SSTP Client\r\n\r\n`;
       socket.write(req);
@@ -452,15 +459,20 @@ function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
       buffer += chunk.toString("latin1");
       if (buffer.includes("\r\n\r\n") || buffer.length > 512) {
         const firstLine = buffer.split("\r\n")[0];
-        finish(/^HTTP\/1\.[01] 200/.test(buffer), `پاسخ غیرمنتظره: "${firstLine}"`);
+        if (/^HTTP\/1\.[01] 200/.test(buffer)) {
+          finish(true, `پاسخ موفق: ${firstLine}`);
+        } else {
+          finish(false, `پاسخ ناموفق: ${firstLine}`);
+        }
       }
     });
 
-    socket.on("timeout", () => finish(false, "تایم‌اوت در برقراری TLS یا دریافت پاسخ"));
-    socket.on("error", (err) => finish(false, `خطای اتصال/TLS: ${err.code || err.message}`));
+    socket.on("timeout", () => finish(false, "تایم‌اوت در TLS Handshake یا دریافت پاسخ"));
+    socket.on("error", (err) => finish(false, `خطای شبکه/TLS: ${err.code || err.message}`));
     socket.on("close", () => finish(false, "اتصال قبل از دریافت پاسخ بسته شد"));
   });
 }
+
 
 async function testAllSstp(servers, concurrency) {
   const healthy = [];
