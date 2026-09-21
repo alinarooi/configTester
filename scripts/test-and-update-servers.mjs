@@ -33,7 +33,7 @@ const CONCURRENCY = Number(process.env.CONCURRENCY || 12);
 const CORE_WARMUP_MS = Number(process.env.CORE_WARMUP_MS || 400);
 
 // حداکثر پینگ مجاز به میلی‌ثانیه (۵۰۰۰ میلی‌ثانیه = ۵ ثانیه)
-const MAX_ALLOWED_PING_MS = Number(process.env.MAX_ALLOWED_PING_MS || 5000);
+const MAX_ALLOWED_PING_MS = Number(process.env.MAX_ALLOWED_PING_MS || 50000);
 
 const TEST_TIMEOUT_S = Number(process.env.TEST_TIMEOUT_S || 5);
 const TEST_URL = "https://www.gstatic.com/generate_204";
