@@ -35,66 +35,88 @@ const TEST_TIMEOUT_S = Number(process.env.TEST_TIMEOUT_S || 6);
 const TEST_URL = "https://www.gstatic.com/generate_204";
 const BASE_PORT = 20000;
 
-// --- VPNGate / SSTP ---
-const VPNGATE_API_URL = "http://www.vpngate.net/api/iphone/";
-const SSTP_PORT = 443;
-const MAX_SSTP_CANDIDATES = Number(process.env.MAX_SSTP_CANDIDATES || 200);
-const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 30);
-const SSTP_TIMEOUT_MS = Number(process.env.SSTP_TIMEOUT_MS || 6000);
-
 /**
  * محافظ در برابر حذف ناگهانی: چون Worker فعلی هیچ اعتبارسنجی روی بدنه‌ی
  * درخواست ندارد (هر آرایه‌ای را می‌پذیرد و جایگزین می‌کند)، این چک باید
  * اینجا در اسکریپت انجام شود. اگر لیست نهایی به‌طرز غیرمنتظره‌ای خیلی
- * کوچک‌تر از لیست فعلی شود (مثلاً به‌خاطر یک باگ یا قطعی موقت شبکه‌ی
- * runner)، آپلود متوقف می‌شود تا به‌جای یک بازنویسی مخرب، دستی بررسی شود.
+ * کوچک‌تر از لیست فعلی شود، آپلود متوقف می‌شود.
  */
 const MIN_KEEP_RATIO = Number(process.env.MIN_KEEP_RATIO || 0.5);
 
 function requireEnv(name) {
   const v = process.env[name];
+
   if (!v) {
     console.error(`متغیر محیطی ${name} تنظیم نشده است.`);
     process.exit(1);
   }
+
   return v;
 }
 
 // ---------------------------------------------------------------------
 // دریافت لیست‌ها
 // ---------------------------------------------------------------------
+
 async function fetchCloudflareServers(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
+  });
+
   const arr = await res.json();
+
   return arr
     .map((o, i) => ({
       uri: String(o.address || "").trim(),
       name: String(o.country || `کلودفلر-${i + 1}`),
-      // port را عیناً از روی داده‌ی موجود نگه می‌داریم: یا رشته‌ی
-      // "v2ray" (سرورهای V2Ray) یا یک عدد (سرورهای SSTP). این‌طور
-      // رکوردهای تست‌نشده هنگام merge نوع‌شان را از دست نمی‌دهند.
-      port: o.port === "v2ray" ? "v2ray" : Number(o.port) || "v2ray",
+
+      // "v2ray" برای سرورهای V2Ray
+      // عدد برای SSTP
+      port:
+        o.port === "v2ray"
+          ? "v2ray"
+          : Number(o.port) || "v2ray",
+
       ping: -1,
     }))
     .filter((s) => s.uri.length > 0);
 }
 
 async function fetchGithubConfigs(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(15000),
+  });
+
   let text = await res.text();
 
   // اگر کل محتوا base64 بود، decode کن
   const maybeDecoded = tryBase64Decode(text.trim());
+
   if (maybeDecoded && maybeDecoded.includes("://")) {
     text = maybeDecoded;
   }
 
-  const schemes = ["vless://", "vmess://", "ss://", "trojan://", "hysteria2://", "hy2://"];
+  const schemes = [
+    "vless://",
+    "vmess://",
+    "ss://",
+    "trojan://",
+    "hysteria2://",
+    "hy2://",
+  ];
+
   return text
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => schemes.some((s) => l.startsWith(s)))
-    .map((uri, i) => ({ uri, name: `گیت‌هاب-${i + 1}`, port: "v2ray", ping: -1 }));
+    .filter((l) =>
+      schemes.some((s) => l.startsWith(s))
+    )
+    .map((uri, i) => ({
+      uri,
+      name: `گیت‌هاب-${i + 1}`,
+      port: "v2ray",
+      ping: -1,
+    }));
 }
 
 function tryBase64Decode(s) {
@@ -105,65 +127,146 @@ function tryBase64Decode(s) {
   }
 }
 
-const dedupKey = (uri) => uri.trim().split("#")[0];
+const dedupKey = (uri) =>
+  uri.trim().split("#")[0];
 
 // ---------------------------------------------------------------------
-// ساخت کانفیگ Xray از روی لینک (vless/vmess/trojan/ss/hysteria)
+// ساخت کانفیگ Xray
 // ---------------------------------------------------------------------
+
 function parseLinkToOutbound(link) {
   const scheme = link.split("://")[0];
+
   switch (scheme) {
     case "vless":
       return buildVless(link);
+
     case "vmess":
       return buildVmess(link);
+
     case "trojan":
       return buildTrojan(link);
+
     case "ss":
       return buildShadowsocks(link);
+
     case "hysteria2":
     case "hy2":
       return buildHysteria(link);
+
     default:
-      throw new Error(`پروتکل پشتیبانی نمی‌شود: ${scheme}`);
+      throw new Error(
+        `پروتکل پشتیبانی نمی‌شود: ${scheme}`
+      );
   }
 }
 
-function buildStreamSettings({ security, network, sni, fp, alpn, path, host, mode, serviceName, pbk, sid, spx }) {
-  const s = { network, security };
+function buildStreamSettings({
+  security,
+  network,
+  sni,
+  fp,
+  alpn,
+  path,
+  host,
+  mode,
+  serviceName,
+  pbk,
+  sid,
+  spx,
+}) {
+  const s = {
+    network,
+    security,
+  };
+
   if (security === "tls") {
-    s.tlsSettings = { serverName: sni };
-    if (fp) s.tlsSettings.fingerprint = fp;
-    if (alpn) s.tlsSettings.alpn = alpn.split(",");
+    s.tlsSettings = {
+      serverName: sni,
+    };
+
+    if (fp) {
+      s.tlsSettings.fingerprint = fp;
+    }
+
+    if (alpn) {
+      s.tlsSettings.alpn = alpn.split(",");
+    }
   } else if (security === "reality") {
-    s.realitySettings = { serverName: sni, publicKey: pbk || "" };
-    if (fp) s.realitySettings.fingerprint = fp;
-    if (sid) s.realitySettings.shortId = sid;
-    if (spx) s.realitySettings.spiderX = spx;
+    s.realitySettings = {
+      serverName: sni,
+      publicKey: pbk || "",
+    };
+
+    if (fp) {
+      s.realitySettings.fingerprint = fp;
+    }
+
+    if (sid) {
+      s.realitySettings.shortId = sid;
+    }
+
+    if (spx) {
+      s.realitySettings.spiderX = spx;
+    }
   }
+
   if (network === "ws") {
-    s.wsSettings = { path: path || "/", headers: { Host: host } };
+    s.wsSettings = {
+      path: path || "/",
+      headers: {
+        Host: host,
+      },
+    };
   } else if (network === "xhttp") {
-    s.xhttpSettings = { path: path || "/", mode: mode || "auto", host };
+    s.xhttpSettings = {
+      path: path || "/",
+      mode: mode || "auto",
+      host,
+    };
   } else if (network === "grpc") {
-    s.grpcSettings = { serviceName: serviceName || "" };
+    s.grpcSettings = {
+      serviceName: serviceName || "",
+    };
   }
+
   return s;
 }
 
 function buildVless(link) {
   const u = new URL(link);
+
   const uuid = decodeURIComponent(u.username);
   const host = u.hostname;
   const port = Number(u.port) || 443;
-  const q = (k, d = "") => u.searchParams.get(k) || d;
+
+  const q = (k, d = "") =>
+    u.searchParams.get(k) || d;
 
   return {
     tag: "proxy",
+
     protocol: "vless",
+
     settings: {
-      vnext: [{ address: host, port, users: [{ id: uuid, encryption: q("encryption", "none") }] }],
+      vnext: [
+        {
+          address: host,
+          port,
+
+          users: [
+            {
+              id: uuid,
+              encryption: q(
+                "encryption",
+                "none"
+              ),
+            },
+          ],
+        },
+      ],
     },
+
     streamSettings: buildStreamSettings({
       security: q("security", "none"),
       network: q("type", "tcp"),
@@ -182,48 +285,99 @@ function buildVless(link) {
 }
 
 function buildVmess(link) {
-  const decoded = Buffer.from(link.replace("vmess://", ""), "base64").toString("utf8");
+  const decoded = Buffer
+    .from(
+      link.replace("vmess://", ""),
+      "base64"
+    )
+    .toString("utf8");
+
   const j = JSON.parse(decoded);
+
   const host = j.add;
   const port = Number(j.port) || 443;
 
   return {
     tag: "proxy",
+
     protocol: "vmess",
+
     settings: {
       vnext: [
         {
           address: host,
           port,
-          users: [{ id: j.id, alterId: Number(j.aid || 0), security: j.scy || "auto" }],
+
+          users: [
+            {
+              id: j.id,
+              alterId: Number(j.aid || 0),
+              security: j.scy || "auto",
+            },
+          ],
         },
       ],
     },
+
     streamSettings: buildStreamSettings({
-      security: j.tls === "tls" ? "tls" : "none",
+      security:
+        j.tls === "tls"
+          ? "tls"
+          : "none",
+
       network: j.net || "tcp",
-      sni: j.sni || j.host || host,
+
+      sni:
+        j.sni ||
+        j.host ||
+        host,
+
       fp: j.fp || "",
       alpn: j.alpn || "",
-      path: j.path || "/",
-      host: j.host || host,
+
+      path:
+        j.path || "/",
+
+      host:
+        j.host || host,
+
       mode: "auto",
-      serviceName: j.path || "",
+
+      serviceName:
+        j.path || "",
     }),
   };
 }
 
 function buildTrojan(link) {
   const u = new URL(link);
-  const password = decodeURIComponent(u.username);
+
+  const password =
+    decodeURIComponent(u.username);
+
   const host = u.hostname;
-  const port = Number(u.port) || 443;
-  const q = (k, d = "") => u.searchParams.get(k) || d;
+
+  const port =
+    Number(u.port) || 443;
+
+  const q = (k, d = "") =>
+    u.searchParams.get(k) || d;
 
   return {
     tag: "proxy",
+
     protocol: "trojan",
-    settings: { servers: [{ address: host, port, password }] },
+
+    settings: {
+      servers: [
+        {
+          address: host,
+          port,
+          password,
+        },
+      ],
+    },
+
     streamSettings: buildStreamSettings({
       security: q("security", "tls"),
       network: q("type", "tcp"),
@@ -239,453 +393,1604 @@ function buildTrojan(link) {
 }
 
 function buildShadowsocks(link) {
-  const withoutScheme = link.replace("ss://", "").split("#")[0];
-  let method, password, host, port;
+  const withoutScheme =
+    link
+      .replace("ss://", "")
+      .split("#")[0];
+
+  let method;
+  let password;
+  let host;
+  let port;
 
   if (withoutScheme.includes("@")) {
-    const [userInfo, hostPart] = withoutScheme.split("@");
+    const [
+      userInfo,
+      hostPart,
+    ] = withoutScheme.split("@");
+
     let decodedUserInfo;
+
     try {
-      decodedUserInfo = Buffer.from(userInfo, "base64url").toString("utf8");
+      decodedUserInfo =
+        Buffer
+          .from(userInfo, "base64url")
+          .toString("utf8");
     } catch {
-      decodedUserInfo = Buffer.from(userInfo, "base64").toString("utf8");
+      decodedUserInfo =
+        Buffer
+          .from(userInfo, "base64")
+          .toString("utf8");
     }
-    [method, password] = decodedUserInfo.split(":");
-    const hostPortStr = hostPart.split("/")[0].split("?")[0];
-    const idx = hostPortStr.lastIndexOf(":");
-    host = hostPortStr.slice(0, idx);
-    port = Number(hostPortStr.slice(idx + 1));
+
+    [method, password] =
+      decodedUserInfo.split(":");
+
+    const hostPortStr =
+      hostPart
+        .split("/")[0]
+        .split("?")[0];
+
+    const idx =
+      hostPortStr.lastIndexOf(":");
+
+    host =
+      hostPortStr.slice(0, idx);
+
+    port =
+      Number(
+        hostPortStr.slice(idx + 1)
+      );
   } else {
-    const decodedFull = Buffer.from(withoutScheme, "base64").toString("utf8");
-    const [methodPass, hostPort] = decodedFull.split("@");
-    [method, password] = methodPass.split(":");
-    const idx = hostPort.lastIndexOf(":");
-    host = hostPort.slice(0, idx);
-    port = Number(hostPort.slice(idx + 1));
+    const decodedFull =
+      Buffer
+        .from(withoutScheme, "base64")
+        .toString("utf8");
+
+    const [
+      methodPass,
+      hostPort,
+    ] = decodedFull.split("@");
+
+    [method, password] =
+      methodPass.split(":");
+
+    const idx =
+      hostPort.lastIndexOf(":");
+
+    host =
+      hostPort.slice(0, idx);
+
+    port =
+      Number(
+        hostPort.slice(idx + 1)
+      );
   }
 
   return {
     tag: "proxy",
+
     protocol: "shadowsocks",
-    settings: { servers: [{ address: host, port, method, password }] },
-  };
-}
 
-// طبق مستندات رسمی xtls.github.io: پروتکل "hysteria" است، نه "hysteria2"
-function buildHysteria(link) {
-  const u = new URL(link);
-  const auth = u.username ? decodeURIComponent(u.username) : "";
-  const host = u.hostname;
-  const port = Number(u.port) || 443;
-  const q = (k, d = "") => u.searchParams.get(k) || d;
-
-  return {
-    tag: "proxy",
-    protocol: "hysteria",
-    settings: { version: 2, address: host, port },
-    streamSettings: {
-      network: "hysteria",
-      security: "tls",
-      tlsSettings: {
-        serverName: q("sni", host),
-        allowInsecure: q("insecure", "0") === "1",
-      },
-      hysteriaSettings: { version: 2, auth },
+    settings: {
+      servers: [
+        {
+          address: host,
+          port,
+          method,
+          password,
+        },
+      ],
     },
   };
 }
 
-function buildFullConfig(outbound, socksPort) {
+// طبق مستندات رسمی xtls.github.io
+function buildHysteria(link) {
+  const u = new URL(link);
+
+  const auth =
+    u.username
+      ? decodeURIComponent(u.username)
+      : "";
+
+  const host = u.hostname;
+
+  const port =
+    Number(u.port) || 443;
+
+  const q = (k, d = "") =>
+    u.searchParams.get(k) || d;
+
   return {
-    log: { loglevel: "warning" },
+    tag: "proxy",
+
+    protocol: "hysteria",
+
+    settings: {
+      version: 2,
+      address: host,
+      port,
+    },
+
+    streamSettings: {
+      network: "hysteria",
+      security: "tls",
+
+      tlsSettings: {
+        serverName:
+          q("sni", host),
+
+        allowInsecure:
+          q("insecure", "0") === "1",
+      },
+
+      hysteriaSettings: {
+        version: 2,
+        auth,
+      },
+    },
+  };
+}
+
+function buildFullConfig(
+  outbound,
+  socksPort
+) {
+  return {
+    log: {
+      loglevel: "warning",
+    },
+
     inbounds: [
       {
         listen: "127.0.0.1",
         port: socksPort,
+
         protocol: "socks",
-        settings: { auth: "noauth", udp: false },
+
+        settings: {
+          auth: "noauth",
+          udp: false,
+        },
       },
     ],
-    outbounds: [outbound, { tag: "direct", protocol: "freedom" }],
+
+    outbounds: [
+      outbound,
+
+      {
+        tag: "direct",
+        protocol: "freedom",
+      },
+    ],
   };
 }
 
 // ---------------------------------------------------------------------
-// تست یک سرور: spawn پروسه‌ی xray + curl از طریق SOCKS
+// تست یک سرور V2Ray
 // ---------------------------------------------------------------------
+
 async function testOne(server, port) {
   let outbound;
+
   try {
-    outbound = parseLinkToOutbound(server.uri);
+    outbound =
+      parseLinkToOutbound(server.uri);
   } catch {
-    return null; // لینک پشتیبانی‌نشده یا ناقص
+    return null;
   }
 
-  const configPath = path.join(os.tmpdir(), `xray-test-${port}.json`);
-  await fs.writeFile(configPath, JSON.stringify(buildFullConfig(outbound, port)));
+  const configPath =
+    path.join(
+      os.tmpdir(),
+      `xray-test-${port}.json`
+    );
 
-  const child = spawn(XRAY_BIN, ["run", "-c", configPath], {
-    stdio: "ignore",
-  });
+  await fs.writeFile(
+    configPath,
+    JSON.stringify(
+      buildFullConfig(
+        outbound,
+        port
+      )
+    )
+  );
+
+  const child = spawn(
+    XRAY_BIN,
+    [
+      "run",
+      "-c",
+      configPath,
+    ],
+    {
+      stdio: "ignore",
+    }
+  );
 
   try {
-    await sleep(CORE_WARMUP_MS);
+    await sleep(
+      CORE_WARMUP_MS
+    );
 
     const start = Date.now();
-    const { stdout } = await execFileP("curl", [
-      "--socks5", `127.0.0.1:${port}`,
-      "-m", String(TEST_TIMEOUT_S),
-      "-s", "-o", "/dev/null",
-      "-w", "%{http_code}",
-      TEST_URL,
-    ]);
-    const elapsed = Date.now() - start;
-    const code = stdout.trim();
 
-    if (code === "204" || (code.startsWith("2") && code.length === 3)) {
+    const { stdout } =
+      await execFileP(
+        "curl",
+        [
+          "--socks5",
+          `127.0.0.1:${port}`,
+
+          "-m",
+          String(TEST_TIMEOUT_S),
+
+          "-s",
+          "-o",
+          "/dev/null",
+
+          "-w",
+          "%{http_code}",
+
+          TEST_URL,
+        ]
+      );
+
+    const elapsed =
+      Date.now() - start;
+
+    const code =
+      stdout.trim();
+
+    if (
+      code === "204" ||
+      (
+        code.startsWith("2") &&
+        code.length === 3
+      )
+    ) {
       return elapsed;
     }
+
     return null;
   } catch {
     return null;
   } finally {
     child.kill("SIGKILL");
-    await fs.rm(configPath, { force: true });
+
+    await fs.rm(
+      configPath,
+      {
+        force: true,
+      }
+    );
   }
 }
 
 function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise(
+    (r) => setTimeout(r, ms)
+  );
 }
 
 // ---------------------------------------------------------------------
-// اجرای موازی با محدودیت تعداد هم‌زمان
+// اجرای موازی V2Ray
 // ---------------------------------------------------------------------
-async function testAll(servers, concurrency) {
+
+async function testAll(
+  servers,
+  concurrency
+) {
   const healthy = [];
   const tested = new Set();
+
   let nextIndex = 0;
   let nextPort = BASE_PORT;
 
   async function worker() {
     while (true) {
-      const i = nextIndex++;
-      if (i >= servers.length) return;
-      const server = servers[i];
-      const port = nextPort++;
+      const i =
+        nextIndex++;
 
-      const ping = await testOne(server, port);
-      tested.add(dedupKey(server.uri));
+      if (
+        i >= servers.length
+      ) {
+        return;
+      }
+
+      const server =
+        servers[i];
+
+      const port =
+        nextPort++;
+
+      const ping =
+        await testOne(
+          server,
+          port
+        );
+
+      tested.add(
+        dedupKey(server.uri)
+      );
+
       if (ping != null) {
-        healthy.push({ ...server, ping });
-        console.log(`✅ سالم (${ping}ms): ${server.name}`);
+        healthy.push({
+          ...server,
+          ping,
+        });
+
+        console.log(
+          `✅ سالم (${ping}ms): ${server.name}`
+        );
       } else {
-        console.log(`❌ ناسالم: ${server.name}`);
+        console.log(
+          `❌ ناسالم: ${server.name}`
+        );
       }
     }
   }
 
-  await Promise.all(Array.from({ length: concurrency }, worker));
-  healthy.sort((a, b) => a.ping - b.ping);
-  return { healthy, tested };
+  await Promise.all(
+    Array.from(
+      {
+        length: concurrency,
+      },
+      worker
+    )
+  );
+
+  healthy.sort(
+    (a, b) =>
+      a.ping - b.ping
+  );
+
+  return {
+    healthy,
+    tested,
+  };
 }
 
 // ---------------------------------------------------------------------
 // VPNGate / SSTP
 // ---------------------------------------------------------------------
 
+const VPNGATE_API_URL =
+  "http://www.vpngate.net/api/iphone/";
+
+const MAX_SSTP_CANDIDATES =
+  Number(
+    process.env.MAX_SSTP_CANDIDATES ||
+    200
+  );
+
+const SSTP_CONCURRENCY =
+  Number(
+    process.env.SSTP_CONCURRENCY ||
+    1
+  );
+
+const SSTP_TIMEOUT_MS =
+  Number(
+    process.env.SSTP_TIMEOUT_MS ||
+    30000
+  );
+
+const SSTP_USERNAME =
+  process.env.SSTP_USERNAME ||
+  "vpn";
+
+const SSTP_PASSWORD =
+  process.env.SSTP_PASSWORD ||
+  "vpn";
+
+const SSTP_REAL_TUNNEL =
+  process.env.SSTP_REAL_TUNNEL === "1";
+
+const SSTP_INTERNET_TEST =
+  process.env.SSTP_INTERNET_TEST !== "0";
+
+const SSTP_TEST_URL =
+  process.env.SSTP_TEST_URL ||
+  "https://www.gstatic.com/generate_204";
+
 /**
- * لیست عمومی VPNGate را می‌گیرد. فرمت خروجی این API یک CSV با دو خط
- * هدر در ابتدا و یک خط "*" در انتهاست؛ فیلدها به ترتیب:
- * HostName, IP, Score, Ping, Speed, CountryLong, CountryShort, ...,
- * OpenVPN_ConfigData_Base64 (آخرین ستون)
- *
- * نکته‌ی مهم: پورت واقعی SSTP/SoftEther ثابت ۴۴۳ نیست — بسیاری از
- * سرورهای داوطلبانه‌ی VPNGate (که روی کامپیوتر شخصی افراد اجرا
- * می‌شوند، نه سرور اختصاصی) از یک پورت تصادفی دیگر استفاده می‌کنند.
- * چون SoftEther همان پورت OpenVPN را برای تشخیص خودکار پروتکل
- * (از جمله SSTP) به‌کار می‌برد، پورت واقعی را از خطِ "remote HOST PORT"
- * داخل خودِ کانفیگ OpenVPN منتشرشده استخراج می‌کنیم.
+ * دریافت VPNGate
  */
 async function fetchVpnGateServers() {
-  const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
-  const text = await res.text();
+  const res =
+    await fetch(
+      VPNGATE_API_URL,
+      {
+        signal:
+          AbortSignal.timeout(15000),
+      }
+    );
 
-  const lines = text.replace(/\r/g, "").split("\n").slice(2, -2);
+  if (!res.ok) {
+    throw new Error(
+      `VPNGate HTTP ${res.status}`
+    );
+  }
+
+  const text =
+    await res.text();
+
+  const lines =
+    text
+      .replace(/\r/g, "")
+      .split("\n")
+      .slice(2, -2);
+
   const servers = [];
 
   for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const cols = line.split(",");
-      const hostName = cols[0];
-      const ip = cols[1];
-      const countryLong = cols[5] || "Unknown";
-      const address = ip || hostName;
-      if (!address) continue;
+    if (!line.trim()) {
+      continue;
+    }
 
-      // آخرین ستون، کانفیگ OpenVPN به‌صورت base64 است (ممکن است خودش
-      // شامل کاراکترهای base64 باشد که کاما ندارند، پس join امن است)
-      const ovpnBase64 = cols.slice(14).join(",").trim();
-      let port = SSTP_PORT; // fallback اگر پارس نشد
+    try {
+      const cols =
+        line.split(",");
+
+      const hostName =
+        String(
+          cols[0] || ""
+        ).trim();
+
+      const ip =
+        String(
+          cols[1] || ""
+        ).trim();
+
+      const countryLong =
+        String(
+          cols[5] || "Unknown"
+        ).trim();
+
+      const address =
+        hostName || ip;
+
+      if (!address) {
+        continue;
+      }
+
+      // OpenVPN config
+      const ovpnBase64 =
+        cols
+          .slice(14)
+          .join(",")
+          .trim();
+
+      let port = 443;
+
       if (ovpnBase64) {
         try {
-          const ovpnConfig = Buffer.from(ovpnBase64, "base64").toString("utf8");
-          const match = ovpnConfig.match(/^remote\s+\S+\s+(\d+)/m);
-          if (match) port = Number(match[1]);
+          const ovpnConfig =
+            Buffer
+              .from(
+                ovpnBase64,
+                "base64"
+              )
+              .toString("utf8");
+
+          const match =
+            ovpnConfig.match(
+              /^remote\s+\S+\s+(\d+)/m
+            );
+
+          if (match) {
+            port =
+              Number(match[1]);
+          }
         } catch {
-          // اگر decode نشد، همان fallback باقی می‌ماند
+          port = 443;
         }
       }
 
+      if (
+        !Number.isInteger(port) ||
+        port < 1 ||
+        port > 65535
+      ) {
+        continue;
+      }
+
       servers.push({
-        uri: address.trim(),
-        name: countryLong.trim(),
+        uri: address,
+
+        name:
+          countryLong ||
+          hostName ||
+          ip,
+
         port,
+
+        ip,
+
+        hostName,
+
         ping: -1,
       });
     } catch {
-      // خط بدشکل، رد می‌شویم
+      // خط بدشکل
     }
   }
+
   return servers;
 }
 
-/**
- * دست‌دهی اولیه‌ی SSTP را روی یک اتصال TLS انجام می‌دهد. این احراز
- * هویت PPP/CHAP کامل نیست — فقط تأیید می‌کند که یک سرویس SSTP واقعی
- * (نه صرفاً یک پورت باز) پشت این آدرس در حال اجراست: اتصال TLS برقرار
- * می‌شود، درخواست SSTP_DUPLEX_POST فرستاده می‌شود، و پاسخ باید
- * "HTTP/1.1 200" باشد.
- */
-function testSstp(host, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
-  return new Promise((resolve) => {
-    let settled = false;
-    let buffer = "";
-    const start = Date.now();
+// ---------------------------------------------------------------------
+// تست واقعی SSTP
+// ---------------------------------------------------------------------
 
-    const socket = tls.connect({
-      host,
-      port,
-      rejectUnauthorized: false, // سرورهای SSTP معمولاً گواهی self-signed دارند
-      timeout: timeoutMs,
-    });
+async function testSstpReal(
+  server,
+  timeoutMs = SSTP_TIMEOUT_MS
+) {
+  const host =
+    server.hostName ||
+    server.uri;
 
-    const finish = (ok, reason) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      if (!ok && process.env.SSTP_DEBUG === "1") {
-        console.log(`   [debug ${host}:${port}] ${reason}`);
+  const port =
+    Number(server.port) || 443;
+
+  const started =
+    Date.now();
+
+  let child = null;
+  let pppInterface = null;
+  let output = "";
+  let settled = false;
+
+  const finish =
+    async (
+      ok,
+      reason = ""
+    ) => {
+      if (settled) {
+        return null;
       }
-      resolve(ok ? Date.now() - start : null);
+
+      settled = true;
+
+      if (
+        process.env.SSTP_DEBUG === "1"
+      ) {
+        if (ok) {
+          console.log(
+            `   [SSTP debug] ${host}:${port} -> ${reason}`
+          );
+        } else {
+          const shortLog =
+            output
+              .replace(/\n+/g, " | ")
+              .slice(-1200);
+
+          console.log(
+            `   [SSTP debug] ${host}:${port} -> ${reason}` +
+            (
+              shortLog
+                ? ` | ${shortLog}`
+                : ""
+            )
+          );
+        }
+      }
+
+      // kill کردن sstpc و pppd
+      if (child?.pid) {
+        try {
+          process.kill(
+            -child.pid,
+            "SIGTERM"
+          );
+        } catch {
+          try {
+            child.kill("SIGTERM");
+          } catch {}
+        }
+
+        await sleep(1200);
+
+        try {
+          process.kill(
+            -child.pid,
+            "SIGKILL"
+          );
+        } catch {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }
+      }
+
+      // اگر PPP باقی مانده بود
+      if (pppInterface) {
+        try {
+          await execFileP(
+            "sudo",
+            [
+              "-n",
+              "ip",
+              "link",
+              "set",
+              pppInterface,
+              "down",
+            ],
+            {
+              timeout: 3000,
+            }
+          );
+        } catch {}
+      }
+
+      return ok
+        ? Date.now() - started
+        : null;
     };
 
-    socket.on("secureConnect", () => {
-      const guid = "00000000-0000-0000-0000-000000000000";
-      const req =
-        `SSTP_DUPLEX_POST /sra_{${guid}} HTTP/1.1\r\n` +
-        `Content-Length: 18446744073709551615\r\n` +
-        `Host: ${host}\r\n` +
-        `SSTPCORRELATIONID: {${guid}}\r\n\r\n`;
-      socket.write(req);
-    });
+  try {
+    const args = [
+      "-n",
+      "sstpc",
 
-    socket.on("data", (chunk) => {
-      buffer += chunk.toString("latin1");
-      if (buffer.includes("\r\n\r\n") || buffer.length > 512) {
-        const firstLine = buffer.split("\r\n")[0];
-        finish(/^HTTP\/1\.1 200/.test(buffer), `پاسخ غیرمنتظره: "${firstLine}"`);
+      "--log-stderr",
+      "--log-level",
+      "3",
+
+      "--cert-warn",
+      "--tls-ext",
+      "--save-server-route",
+
+      "--user",
+      SSTP_USERNAME,
+
+      "--password",
+      SSTP_PASSWORD,
+
+      `${host}:${port}`,
+
+      // PPP options
+      "usepeerdns",
+      "require-mschap-v2",
+      "noauth",
+      "noipdefault",
+      "defaultroute",
+
+      "refuse-eap",
+      "refuse-pap",
+      "refuse-chap",
+      "refuse-mschap",
+
+      "nobsdcomp",
+      "nodeflate",
+    ];
+
+    child =
+      spawn(
+        "sudo",
+        args,
+        {
+          detached: true,
+          stdio: [
+            "ignore",
+            "pipe",
+            "pipe",
+          ],
+        }
+      );
+
+    child.stdout.on(
+      "data",
+      (d) => {
+        output +=
+          d.toString();
       }
-    });
+    );
 
-    socket.on("timeout", () => finish(false, "timeout (نه TLS نه پاسخی رسید)"));
-    socket.on("error", (err) => finish(false, `خطای اتصال/TLS: ${err.code || err.message}`));
-    socket.on("close", () => finish(false, "اتصال بدون پاسخ کامل بسته شد"));
-  });
+    child.stderr.on(
+      "data",
+      (d) => {
+        output +=
+          d.toString();
+      }
+    );
+
+    let childExitInfo = null;
+
+    child.once(
+      "exit",
+      (code, signal) => {
+        childExitInfo = {
+          code,
+          signal,
+        };
+      }
+    );
+
+    child.once(
+      "error",
+      (err) => {
+        childExitInfo = {
+          error: err.message,
+        };
+      }
+    );
+
+    // منتظر PPP
+    const deadline =
+      Date.now() + timeoutMs;
+
+    while (
+      Date.now() < deadline
+    ) {
+      await sleep(500);
+
+      let links = "";
+
+      try {
+        const result =
+          await execFileP(
+            "ip",
+            [
+              "-o",
+              "link",
+              "show",
+              "type",
+              "ppp",
+            ],
+            {
+              timeout: 3000,
+            }
+          );
+
+        links =
+          result.stdout || "";
+      } catch {}
+
+      const match =
+        links.match(
+          /^\d+:\s+(ppp\d+):/m
+        );
+
+      if (match) {
+        pppInterface =
+          match[1];
+
+        let address = "";
+
+        try {
+          const result =
+            await execFileP(
+              "ip",
+              [
+                "-4",
+                "addr",
+                "show",
+                "dev",
+                pppInterface,
+              ],
+              {
+                timeout: 3000,
+              }
+            );
+
+          address =
+            result.stdout || "";
+        } catch {}
+
+        if (
+          /inet\s+\d+\.\d+\.\d+\.\d+/
+            .test(address)
+        ) {
+          break;
+        }
+      }
+
+      if (childExitInfo) {
+        return await finish(
+          false,
+          `sstpc قبل از PPP خارج شد: ${JSON.stringify(childExitInfo)}`
+        );
+      }
+    }
+
+    if (!pppInterface) {
+      return await finish(
+        false,
+        "PPP interface ساخته نشد / timeout"
+      );
+    }
+
+    // ---------------------------------------------------------------
+    // تست واقعی اینترنت از داخل PPP
+    // ---------------------------------------------------------------
+
+    if (SSTP_INTERNET_TEST) {
+      const curlStart =
+        Date.now();
+
+      try {
+        const { stdout } =
+          await execFileP(
+            "curl",
+            [
+              "--interface",
+              pppInterface,
+
+              "-4",
+
+              "--connect-timeout",
+              "8",
+
+              "--max-time",
+              "12",
+
+              "-sS",
+
+              "-o",
+              "/dev/null",
+
+              "-w",
+              "%{http_code}",
+
+              SSTP_TEST_URL,
+            ],
+            {
+              timeout: 15000,
+            }
+          );
+
+        const code =
+          stdout.trim();
+
+        if (
+          code === "204" ||
+          (
+            code.startsWith("2") &&
+            code.length === 3
+          )
+        ) {
+          const elapsed =
+            Date.now() - started;
+
+          console.log(
+            `✅ [SSTP REAL] سالم (${elapsed}ms): ` +
+            `${host}:${port} ` +
+            `PPP=${pppInterface}, ` +
+            `HTTP=${code}, ` +
+            `Internet=${Date.now() - curlStart}ms`
+          );
+
+          return await finish(
+            true,
+            `PPP=${pppInterface}, HTTP=${code}`
+          );
+        }
+
+        return await finish(
+          false,
+          `اینترنت ناموفق؛ HTTP=${code || "empty"}`
+        );
+      } catch (e) {
+        return await finish(
+          false,
+          `تست اینترنت شکست خورد: ${e.code || e.message}`
+        );
+      }
+    }
+
+    return await finish(
+      true,
+      `PPP=${pppInterface}`
+    );
+  } catch (e) {
+    return await finish(
+      false,
+      `خطای SSTP: ${e.code || e.message}`
+    );
+  }
 }
 
-async function testAllSstp(servers, concurrency) {
+// ---------------------------------------------------------------------
+// تست قدیمی TLS/SSTP
+// فقط زمانی استفاده می‌شود که SSTP_REAL_TUNNEL=0 باشد.
+// ---------------------------------------------------------------------
+
+function testSstpHandshake(
+  host,
+  port = 443,
+  timeoutMs = SSTP_TIMEOUT_MS
+) {
+  return new Promise(
+    (resolve) => {
+      let settled = false;
+      let buffer = "";
+
+      const start =
+        Date.now();
+
+      const socket =
+        tls.connect({
+          host,
+          port,
+
+          servername: host,
+
+          rejectUnauthorized: false,
+
+          timeout: timeoutMs,
+        });
+
+      const finish =
+        (
+          ok,
+          reason
+        ) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+
+          socket.destroy();
+
+          if (
+            !ok &&
+            process.env.SSTP_DEBUG === "1"
+          ) {
+            console.log(
+              `   [SSTP debug] ${host}:${port} ${reason}`
+            );
+          }
+
+          resolve(
+            ok
+              ? Date.now() - start
+              : null
+          );
+        };
+
+      socket.on(
+        "secureConnect",
+        () => {
+          const guid =
+            "BA195980-CD49-458b-9E23-C84EE0ADCD75";
+
+          const correlation =
+            cryptoRandomUuid();
+
+          const req =
+            `SSTP_DUPLEX_POST /sra_{${guid}} HTTP/1.1\r\n` +
+            `Content-Length: 18446744073709551615\r\n` +
+            `Host: ${host}\r\n` +
+            `SSTPCORRELATIONID: {${correlation}}\r\n\r\n`;
+
+          socket.write(req);
+        }
+      );
+
+      socket.on(
+        "data",
+        (chunk) => {
+          buffer +=
+            chunk.toString(
+              "latin1"
+            );
+
+          if (
+            buffer.includes(
+              "\r\n\r\n"
+            ) ||
+            buffer.length > 512
+          ) {
+            const firstLine =
+              buffer.split(
+                "\r\n"
+              )[0];
+
+            finish(
+              /^HTTP\/1\.1 200/.test(
+                buffer
+              ),
+              `پاسخ: "${firstLine}"`
+            );
+          }
+        }
+      );
+
+      socket.on(
+        "timeout",
+        () =>
+          finish(
+            false,
+            "timeout"
+          )
+      );
+
+      socket.on(
+        "error",
+        (err) =>
+          finish(
+            false,
+            `TLS: ${err.code || err.message}`
+          )
+      );
+
+      socket.on(
+        "close",
+        () =>
+          finish(
+            false,
+            "اتصال بسته شد"
+          )
+      );
+    }
+  );
+}
+
+function cryptoRandomUuid() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+    .replace(
+      /[xy]/g,
+      (c) => {
+        const r =
+          Math.random() * 16 | 0;
+
+        const v =
+          c === "x"
+            ? r
+            : (r & 0x3 | 0x8);
+
+        return v.toString(16);
+      }
+    );
+}
+
+// ---------------------------------------------------------------------
+// تست تمام SSTPها
+// ---------------------------------------------------------------------
+
+async function testAllSstp(
+  servers,
+  concurrency
+) {
   const healthy = [];
   const tested = new Set();
+
   let nextIndex = 0;
 
   async function worker() {
     while (true) {
-      const i = nextIndex++;
-      if (i >= servers.length) return;
-      const server = servers[i];
+      const i =
+        nextIndex++;
 
-      const ping = await testSstp(server.uri, server.port);
-      tested.add(dedupKey(server.uri));
-      if (ping != null) {
-        healthy.push({ ...server, ping });
-        console.log(`✅ [SSTP] سالم (${ping}ms): ${server.name} (${server.uri})`);
+      if (
+        i >= servers.length
+      ) {
+        return;
+      }
+
+      const server =
+        servers[i];
+
+      const key =
+        dedupKey(server.uri);
+
+      tested.add(key);
+
+      console.log(
+        `🔎 [SSTP] تست ${i + 1}/${servers.length}: ` +
+        `${server.uri}:${server.port}` +
+        `${
+          server.ip
+            ? ` (${server.ip})`
+            : ""
+        }`
+      );
+
+      let ping;
+
+      if (SSTP_REAL_TUNNEL) {
+        ping =
+          await testSstpReal(
+            server,
+            SSTP_TIMEOUT_MS
+          );
       } else {
-        console.log(`❌ [SSTP] ناسالم: ${server.name} (${server.uri})`);
+        ping =
+          await testSstpHandshake(
+            server.uri,
+            server.port,
+            SSTP_TIMEOUT_MS
+          );
+      }
+
+      if (ping != null) {
+        healthy.push({
+          ...server,
+          ping,
+        });
+
+        if (!SSTP_REAL_TUNNEL) {
+          console.log(
+            `✅ [SSTP handshake] سالم (${ping}ms): ` +
+            `${server.uri}:${server.port}`
+          );
+        }
+      } else {
+        console.log(
+          `❌ [SSTP] ناسالم: ` +
+          `${server.uri}:${server.port}`
+        );
       }
     }
   }
 
-  await Promise.all(Array.from({ length: concurrency }, worker));
-  healthy.sort((a, b) => a.ping - b.ping);
-  return { healthy, tested };
+  await Promise.all(
+    Array.from(
+      {
+        length:
+          Math.max(
+            1,
+            concurrency
+          ),
+      },
+      worker
+    )
+  );
+
+  healthy.sort(
+    (a, b) =>
+      a.ping - b.ping
+  );
+
+  return {
+    healthy,
+    tested,
+  };
 }
 
 // ---------------------------------------------------------------------
-// merge: فقط سرورهای واقعاً تست‌شده حذف/به‌روز می‌شوند
+// Merge
 // ---------------------------------------------------------------------
-function mergeResults(remoteList, testedUris, healthyResults) {
-  const healthyByKey = new Map(healthyResults.map((s) => [dedupKey(s.uri), s]));
 
-  const kept = remoteList
-    .map((existing) => {
-      const key = dedupKey(existing.uri);
-      if (healthyByKey.has(key)) return healthyByKey.get(key);
-      if (testedUris.has(key)) return null; // تست شد و رد شد
-      return existing; // تست نشد → دست‌نخورده
-    })
-    .filter(Boolean);
+function mergeResults(
+  remoteList,
+  testedUris,
+  healthyResults
+) {
+  const healthyByKey =
+    new Map(
+      healthyResults.map(
+        (s) => [
+          dedupKey(s.uri),
+          s,
+        ]
+      )
+    );
 
-  const keptKeys = new Set(kept.map((s) => dedupKey(s.uri)));
-  const newlyAdded = healthyResults.filter((s) => !keptKeys.has(dedupKey(s.uri)));
+  const kept =
+    remoteList
+      .map(
+        (existing) => {
+          const key =
+            dedupKey(
+              existing.uri
+            );
 
-  return [...kept, ...newlyAdded];
+          if (
+            healthyByKey.has(key)
+          ) {
+            return healthyByKey.get(
+              key
+            );
+          }
+
+          if (
+            testedUris.has(key)
+          ) {
+            return null;
+          }
+
+          return existing;
+        }
+      )
+      .filter(Boolean);
+
+  const keptKeys =
+    new Set(
+      kept.map(
+        (s) =>
+          dedupKey(s.uri)
+      )
+    );
+
+  const newlyAdded =
+    healthyResults.filter(
+      (s) =>
+        !keptKeys.has(
+          dedupKey(s.uri)
+        )
+    );
+
+  return [
+    ...kept,
+    ...newlyAdded,
+  ];
 }
 
-async function uploadToCloudflare(url, servers) {
+// ---------------------------------------------------------------------
+// آپلود به Cloudflare
+// ---------------------------------------------------------------------
+
+async function uploadToCloudflare(
+  url,
+  servers
+) {
   const unique = [];
   const seen = new Set();
+
   for (const s of servers) {
-    const key = dedupKey(s.uri);
-    if (!seen.has(key)) {
+    const key =
+      dedupKey(s.uri);
+
+    if (
+      !seen.has(key)
+    ) {
       seen.add(key);
       unique.push(s);
     }
   }
 
-  const body = JSON.stringify(
-    unique.map((s, i) => ({
-      id: String(i),
-      address: s.uri.trim(),
-      port: s.port ?? "v2ray", // "v2ray" برای سرورهای V2Ray، عدد برای SSTP
-      country: s.name,
-      ping: s.ping ?? -1,
-      icon: "https://raw.githubusercontent.com/alinarooi/icons/main/global.png",
-    }))
-  );
+  const body =
+    JSON.stringify(
+      unique.map(
+        (s, i) => ({
+          id: String(i),
 
-  const headers = { "Content-Type": "application/json; charset=UTF-8" };
+          address:
+            s.uri.trim(),
 
-  const res = await fetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(15000) });
+          port:
+            s.port ?? "v2ray",
+
+          country:
+            s.name,
+
+          ping:
+            s.ping ?? -1,
+
+          icon:
+            "https://raw.githubusercontent.com/alinarooi/icons/main/global.png",
+        })
+      )
+    );
+
+  const headers = {
+    "Content-Type":
+      "application/json; charset=UTF-8",
+  };
+
+  const res =
+    await fetch(
+      url,
+      {
+        method: "POST",
+        headers,
+        body,
+
+        signal:
+          AbortSignal.timeout(
+            15000
+          ),
+      }
+    );
+
   return res.ok;
 }
 
 // ---------------------------------------------------------------------
-// main
+// MAIN
 // ---------------------------------------------------------------------
+
 async function main() {
-  console.log("در حال دریافت لیست‌ها...");
-  const [cfServers, ghServers] = await Promise.all([
-    fetchCloudflareServers(CF_ALL_URL).catch((e) => {
-      console.error("خطا در دریافت کلودفلر:", e.message);
+  console.log(
+    "در حال دریافت لیست‌ها..."
+  );
+
+  const [
+    cfServers,
+    ghServers,
+  ] = await Promise.all([
+    fetchCloudflareServers(
+      CF_ALL_URL
+    ).catch((e) => {
+      console.error(
+        "خطا در دریافت کلودفلر:",
+        e.message
+      );
+
       return [];
     }),
-    fetchGithubConfigs(GH_RAW_URL).catch((e) => {
-      console.error("خطا در دریافت گیت‌هاب:", e.message);
+
+    fetchGithubConfigs(
+      GH_RAW_URL
+    ).catch((e) => {
+      console.error(
+        "خطا در دریافت گیت‌هاب:",
+        e.message
+      );
+
       return [];
     }),
   ]);
-  console.log(`کلودفلر: ${cfServers.length} | گیت‌هاب: ${ghServers.length}`);
 
-  const seen = new Set();
-  const combined = [...cfServers, ...ghServers]
-    .filter((s) => {
-      const key = dedupKey(s.uri);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .slice(0, MAX_CANDIDATES);
+  console.log(
+    `کلودفلر: ${cfServers.length} | ` +
+    `گیت‌هاب: ${ghServers.length}`
+  );
 
-  console.log(`تعداد یکتا برای تست: ${combined.length}`);
+  // ---------------------------------------------------------------
+  // ترکیب V2Ray
+  // ---------------------------------------------------------------
 
-  let v2rayResult = { healthy: [], tested: new Set() };
-  if (combined.length > 0) {
-    console.log(`شروع تست V2Ray با ${CONCURRENCY} پروسه‌ی هم‌زمان...`);
-    v2rayResult = await testAll(combined, CONCURRENCY);
-    console.log(`نتیجه‌ی V2Ray: ${v2rayResult.healthy.length} سالم از ${v2rayResult.tested.size} تست‌شده.`);
+  const seen =
+    new Set();
+
+  const combined =
+    [
+      ...cfServers,
+      ...ghServers,
+    ]
+      .filter(
+        (s) => {
+          const key =
+            dedupKey(s.uri);
+
+          if (
+            seen.has(key)
+          ) {
+            return false;
+          }
+
+          seen.add(key);
+
+          return true;
+        }
+      )
+      .slice(
+        0,
+        MAX_CANDIDATES
+      );
+
+  console.log(
+    `تعداد یکتا برای تست: ${combined.length}`
+  );
+
+  // ---------------------------------------------------------------
+  // تست V2Ray
+  // ---------------------------------------------------------------
+
+  let v2rayResult = {
+    healthy: [],
+    tested: new Set(),
+  };
+
+  if (
+    combined.length > 0
+  ) {
+    console.log(
+      `شروع تست V2Ray با ${CONCURRENCY} پروسه‌ی هم‌زمان...`
+    );
+
+    v2rayResult =
+      await testAll(
+        combined,
+        CONCURRENCY
+      );
+
+    console.log(
+      `نتیجه‌ی V2Ray: ` +
+      `${v2rayResult.healthy.length} سالم از ` +
+      `${v2rayResult.tested.size} تست‌شده.`
+    );
   } else {
-    console.log("هیچ کاندیدای V2Ray ای برای تست نبود.");
+    console.log(
+      "هیچ کاندیدای V2Ray ای برای تست نبود."
+    );
   }
 
   // ---------------------------------------------------------------
-  // مرحله‌ی دوم: VPNGate / SSTP — طبق درخواست، بعد از V2Ray اجرا می‌شود
+  // VPNGate / SSTP
   // ---------------------------------------------------------------
-  console.log("در حال دریافت لیست VPNGate...");
-  const vpnGateServers = await fetchVpnGateServers().catch((e) => {
-    console.error("خطا در دریافت VPNGate:", e.message);
-    return [];
-  });
-  console.log(`VPNGate: ${vpnGateServers.length} سرور دریافت شد.`);
 
-  const seenSstp = new Set();
-  const sstpCandidates = vpnGateServers
-    .filter((s) => {
-      const key = dedupKey(s.uri);
-      if (seenSstp.has(key)) return false;
-      seenSstp.add(key);
-      return true;
-    })
-    .slice(0, MAX_SSTP_CANDIDATES);
+  console.log(
+    "در حال دریافت لیست VPNGate..."
+  );
 
-  let sstpResult = { healthy: [], tested: new Set() };
-  if (sstpCandidates.length > 0) {
-    console.log(`شروع تست SSTP با ${SSTP_CONCURRENCY} اتصال هم‌زمان روی ${sstpCandidates.length} کاندیدا...`);
-    sstpResult = await testAllSstp(sstpCandidates, SSTP_CONCURRENCY);
-    console.log(`نتیجه‌ی SSTP: ${sstpResult.healthy.length} سالم از ${sstpResult.tested.size} تست‌شده.`);
+  const vpnGateServers =
+    await fetchVpnGateServers()
+      .catch((e) => {
+        console.error(
+          "خطا در دریافت VPNGate:",
+          e.message
+        );
+
+        return [];
+      });
+
+  console.log(
+    `VPNGate: ${vpnGateServers.length} سرور دریافت شد.`
+  );
+
+  const seenSstp =
+    new Set();
+
+  const sstpCandidates =
+    vpnGateServers
+      .filter(
+        (s) => {
+          const key =
+            dedupKey(s.uri);
+
+          if (
+            seenSstp.has(key)
+          ) {
+            return false;
+          }
+
+          seenSstp.add(key);
+
+          return true;
+        }
+      )
+      .slice(
+        0,
+        MAX_SSTP_CANDIDATES
+      );
+
+  let sstpResult = {
+    healthy: [],
+    tested: new Set(),
+  };
+
+  if (
+    sstpCandidates.length > 0
+  ) {
+    console.log(
+      `شروع تست SSTP با ` +
+      `${SSTP_CONCURRENCY} اتصال هم‌زمان ` +
+      `روی ${sstpCandidates.length} کاندیدا...`
+    );
+
+    sstpResult =
+      await testAllSstp(
+        sstpCandidates,
+        SSTP_CONCURRENCY
+      );
+
+    console.log(
+      `نتیجه‌ی SSTP: ` +
+      `${sstpResult.healthy.length} سالم از ` +
+      `${sstpResult.tested.size} تست‌شده.`
+    );
   } else {
-    console.log("هیچ کاندیدای SSTP ای برای تست نبود.");
+    console.log(
+      "هیچ کاندیدای SSTP ای برای تست نبود."
+    );
   }
 
   // ---------------------------------------------------------------
-  // ادغام نتایج هر دو مرحله و یک آپلود واحد
+  // Merge
   // ---------------------------------------------------------------
-  const healthy = [...v2rayResult.healthy, ...sstpResult.healthy];
-  const tested = new Set([...v2rayResult.tested, ...sstpResult.tested]);
 
-  if (healthy.length === 0) {
-    console.log("هیچ سرور سالمی (نه V2Ray نه SSTP) پیدا نشد — لیست کلودفلر دست‌نخورده می‌ماند.");
+  const healthy = [
+    ...v2rayResult.healthy,
+    ...sstpResult.healthy,
+  ];
+
+  const tested =
+    new Set([
+      ...v2rayResult.tested,
+      ...sstpResult.tested,
+    ]);
+
+  if (
+    healthy.length === 0
+  ) {
+    console.log(
+      "هیچ سرور سالمی (نه V2Ray نه SSTP) پیدا نشد — " +
+      "لیست کلودفلر دست‌نخورده می‌ماند."
+    );
+
     return;
   }
 
-  console.log("دریافت مجدد لیست کلودفلر برای merge امن...");
-  const freshRemote = await fetchCloudflareServers(CF_ALL_URL).catch(() => cfServers);
-  const merged = mergeResults(freshRemote, tested, healthy);
+  console.log(
+    "دریافت مجدد لیست کلودفلر برای merge امن..."
+  );
 
-  // محافظ در برابر کوچک شدن ناگهانی و مخرب لیست (چون Worker خودش
-  // چنین چکی ندارد و جایگزینی را بدون سؤال قبول می‌کند)
-  if (freshRemote.length > 0) {
-    const ratio = merged.length / freshRemote.length;
-    if (ratio < MIN_KEEP_RATIO) {
+  const freshRemote =
+    await fetchCloudflareServers(
+      CF_ALL_URL
+    ).catch(
+      () => cfServers
+    );
+
+  const merged =
+    mergeResults(
+      freshRemote,
+      tested,
+      healthy
+    );
+
+  // ---------------------------------------------------------------
+  // محافظ کاهش شدید لیست
+  // ---------------------------------------------------------------
+
+  if (
+    freshRemote.length > 0
+  ) {
+    const ratio =
+      merged.length /
+      freshRemote.length;
+
+    if (
+      ratio < MIN_KEEP_RATIO
+    ) {
       console.error(
-        `⚠️ آپلود متوقف شد: لیست نهایی (${merged.length}) کمتر از ` +
-        `${Math.round(MIN_KEEP_RATIO * 100)}% لیست فعلی (${freshRemote.length}) است. ` +
-        `این می‌تواند نشانه‌ی یک مشکل شبکه‌ی runner یا باگ باشد، نه واقعاً ` +
-        `خراب بودن این‌همه سرور. برای عبور از این محافظ، MIN_KEEP_RATIO را کم کنید.`
+        `⚠️ آپلود متوقف شد: ` +
+        `لیست نهایی (${merged.length}) کمتر از ` +
+        `${Math.round(
+          MIN_KEEP_RATIO * 100
+        )}% لیست فعلی ` +
+        `(${freshRemote.length}) است. ` +
+        `این می‌تواند نشانه‌ی یک مشکل شبکه‌ی runner ` +
+        `یا باگ باشد، نه واقعاً خراب بودن این‌همه سرور. ` +
+        `برای عبور از این محافظ، MIN_KEEP_RATIO را کم کنید.`
       );
+
       process.exit(1);
     }
   }
 
-  console.log(`آپلود ${merged.length} سرور نهایی به کلودفلر...`);
-  const ok = await uploadToCloudflare(CF_UPDATE_URL, merged);
-  console.log(ok ? "✅ آپلود موفق بود." : "❌ آپلود ناموفق بود.");
+  // ---------------------------------------------------------------
+  // Upload
+  // ---------------------------------------------------------------
 
-  if (!ok) process.exit(1);
+  console.log(
+    `آپلود ${merged.length} سرور نهایی به کلودفلر...`
+  );
+
+  const ok =
+    await uploadToCloudflare(
+      CF_UPDATE_URL,
+      merged
+    );
+
+  console.log(
+    ok
+      ? "✅ آپلود موفق بود."
+      : "❌ آپلود ناموفق بود."
+  );
+
+  if (!ok) {
+    process.exit(1);
+  }
 }
 
+// ---------------------------------------------------------------------
+// اجرای برنامه
+// ---------------------------------------------------------------------
+
 main().catch((e) => {
-  console.error("خطای کلی:", e);
+  console.error(
+    "خطای کلی:",
+    e
+  );
+
   process.exit(1);
 });
