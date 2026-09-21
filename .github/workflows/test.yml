@@ -2,7 +2,7 @@ name: Test & Update Server List
 
 on:
   schedule:
-  - cron: "0 */4 * * *"
+  - cron: "0 */2 * * *"
 
   workflow_dispatch: {}
 
@@ -207,7 +207,7 @@ jobs:
           # V2Ray testing
           # --------------------------------------
           MAX_CANDIDATES: "5000"
-          CONCURRENCY: "60"
+          CONCURRENCY: "120"
           MIN_KEEP_RATIO: "0.5"
 
           # --------------------------------------
@@ -232,7 +232,7 @@ jobs:
           # --------------------------------------
           # SSTP timeout
           # --------------------------------------
-          SSTP_TIMEOUT_MS: "4000"
+          SSTP_TIMEOUT_MS: "3000"
 
           # --------------------------------------
           # SSTP debug
