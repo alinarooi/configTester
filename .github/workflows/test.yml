@@ -22,31 +22,98 @@ jobs:
       - name: Install SSTP client
         run: |
           sudo apt-get update
-          sudo apt-get install -y sstp-client ppp
+          sudo apt-get install -y \
+            sstp-client \
+            ppp \
+            iproute2 \
+            curl
+
+          echo "=== SSTP version ==="
           sstpc --version
+
+          echo "=== PPP version ==="
           pppd --version
+
+      - name: Fix PPP permissions
+        run: |
+          echo "=== Before fix ==="
+          ls -lah /usr/sbin/pppd
+          file /usr/sbin/pppd
+          stat /usr/sbin/pppd
+
+          echo "=== Fixing permissions ==="
+          sudo chmod 755 /usr/sbin/pppd
+          sudo chown root:root /usr/sbin/pppd
+
+          echo "=== After fix ==="
+          ls -lah /usr/sbin/pppd
+          file /usr/sbin/pppd
+          stat /usr/sbin/pppd
+
+          echo "=== Testing pppd ==="
+          sudo -n /usr/sbin/pppd --version || true
+
+      - name: Debug SSTP / PPP
+        run: |
+          echo "=== sstpc location ==="
+          which sstpc
+
+          echo "=== sstpc permissions ==="
+          ls -lah "$(which sstpc)"
+
+          echo "=== pppd location ==="
+          which pppd
+
+          echo "=== pppd permissions ==="
+          ls -lah /usr/sbin/pppd
+
+          echo "=== sudo test ==="
+          sudo -n true
+          echo "sudo exit code: $?"
+
+          echo "=== pppd execute test ==="
+          sudo -n /usr/sbin/pppd --version || true
 
       - name: Download Xray-core
         run: |
-          curl -fL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          curl -fL \
+            -o xray.zip \
+            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+
           unzip -o xray.zip -d xray-bin
+
           chmod +x xray-bin/xray
+
           xray-bin/xray version
 
       - name: Run tester
         env:
           CF_ALL_URL: ${{ secrets.CF_ALL_URL }}
           CF_UPDATE_URL: ${{ secrets.CF_UPDATE_URL }}
+
           GH_RAW_URL: "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt"
+
           XRAY_BIN: ${{ github.workspace }}/xray-bin/xray
+
           MAX_CANDIDATES: "2000"
           CONCURRENCY: "60"
+
           MIN_KEEP_RATIO: "0.5"
+
           MAX_SSTP_CANDIDATES: "2000"
           SSTP_CONCURRENCY: "1"
+
           SSTP_REAL_TUNNEL: "1"
+
           SSTP_USERNAME: "vpn"
           SSTP_PASSWORD: "vpn"
+
           SSTP_TIMEOUT_MS: "30000"
+
+          SSTP_INTERNET_TEST: "1"
+          SSTP_TEST_URL: "https://www.gstatic.com/generate_204"
+
           SSTP_DEBUG: "1"
-        run: node scripts/test-and-update-servers.mjs
+
+        run: |
+          node scripts/test-and-update-servers.mjs
