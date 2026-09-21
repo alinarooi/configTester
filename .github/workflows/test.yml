@@ -2,9 +2,7 @@ name: Test & Update Server List
 
 on:
   schedule:
-    # هر ساعت
     - cron: "0 * * * *"
-
   workflow_dispatch: {}
 
 jobs:
@@ -13,148 +11,42 @@ jobs:
     timeout-minutes: 60
 
     steps:
-
-      # ----------------------------------------
-      # Checkout
-      # ----------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-
-      # ----------------------------------------
-      # Node.js
-      # ----------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-
-      # ----------------------------------------
-      # Install SSTP + PPP
-      # ----------------------------------------
       - name: Install SSTP client
         run: |
-          echo "Installing SSTP client..."
-
           sudo apt-get update
+          sudo apt-get install -y sstp-client ppp
+          sstpc --version
+          pppd --version
 
-          sudo apt-get install -y \
-            sstp-client \
-            ppp \
-            iproute2 \
-            curl
-
-          echo "--------------------------------"
-          echo "sstpc:"
-          sstpc --version || true
-
-          echo "--------------------------------"
-          echo "pppd:"
-          pppd --version || true
-
-          echo "--------------------------------"
-          echo "Network interfaces:"
-          ip addr
-
-
-      # ----------------------------------------
-      # Download Xray
-      # ----------------------------------------
       - name: Download Xray-core
         run: |
-
-          echo "Downloading Xray-core..."
-
-          curl -fL \
-            -o xray.zip \
-            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-
+          curl -fL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
           unzip -o xray.zip -d xray-bin
-
           chmod +x xray-bin/xray
-
-          echo "--------------------------------"
-          echo "Xray version:"
           xray-bin/xray version
 
-
-      # ----------------------------------------
-      # Debug files
-      # ----------------------------------------
-      - name: Debug files
-        run: |
-
-          echo "--------------------------------"
-          echo "Repository files"
-
-          find . \
-            -maxdepth 3 \
-            -type f \
-            \( -name "*.mjs" -o -name "*.yml" -o -name "*.json" \) \
-            | sort
-
-          echo "--------------------------------"
-
-          echo "scripts directory:"
-
-          ls -la scripts/ 2>&1 || true
-
-
-      # ----------------------------------------
-      # Run tester
-      # ----------------------------------------
       - name: Run tester
         env:
-
-          # Cloudflare
           CF_ALL_URL: ${{ secrets.CF_ALL_URL }}
           CF_UPDATE_URL: ${{ secrets.CF_UPDATE_URL }}
-
-          # GitHub configs
           GH_RAW_URL: "https://raw.githubusercontent.com/barry-far/V2ray-Config/main/All_Configs_Sub.txt"
-
-          # Xray
           XRAY_BIN: ${{ github.workspace }}/xray-bin/xray
-
-          # --------------------------------
-          # V2Ray
-          # --------------------------------
           MAX_CANDIDATES: "2000"
           CONCURRENCY: "60"
           MIN_KEEP_RATIO: "0.5"
-
-          # --------------------------------
-          # SSTP
-          # --------------------------------
           MAX_SSTP_CANDIDATES: "2000"
-
-          # فقط یک تونل در هر لحظه
           SSTP_CONCURRENCY: "1"
-
-          # فعال کردن تست واقعی SSTP
           SSTP_REAL_TUNNEL: "1"
-
-          # VPNGate credentials
           SSTP_USERNAME: "vpn"
           SSTP_PASSWORD: "vpn"
-
-          # حداکثر زمان اتصال
           SSTP_TIMEOUT_MS: "30000"
-
-          # تست اینترنت بعد از اتصال
-          SSTP_INTERNET_TEST: "1"
-
-          # آدرس تست اینترنت
-          SSTP_TEST_URL: "https://www.gstatic.com/generate_204"
-
-          # Debug
           SSTP_DEBUG: "1"
-
-        run: |
-
-          echo "======================================"
-          echo "Starting server tester"
-          echo "======================================"
-
-          node scripts/test-and-update-servers.mjs
+        run: node scripts/test-and-update-servers.mjs
