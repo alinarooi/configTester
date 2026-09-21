@@ -31,7 +31,7 @@ const VPNGATE_API_URL = "http://www.vpngate.net/api/iphone/";
 const SSTP_PORT = 443;
 const SSTP_GUID = "386a22a6-4c2e-49a2-8926-2e10e5a73711"; // GUID استاندارد MS-SSTP با حروف کوچک
 const MAX_SSTP_CANDIDATES = Number(process.env.MAX_SSTP_CANDIDATES || 200);
-const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 12); // هم‌زمانی بهینه جهت جلوگیری از Drop
+const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 10); // هم‌زمانی بهینه
 const SSTP_TIMEOUT_MS = Number(process.env.SSTP_TIMEOUT_MS || 5000);
 
 const MIN_KEEP_RATIO = Number(process.env.MIN_KEEP_RATIO || 0.5);
@@ -372,14 +372,13 @@ async function testAll(servers, concurrency) {
 }
 
 // ---------------------------------------------------------------------
-// VPNGate / SSTP
-//---------------------------------------------------------------------
+// VPNGate / SSTP (دریافت و تست با آدرس دامنه و پورت)
+// ---------------------------------------------------------------------
 
-
-// ۱. استخراج دامین واقعی VPNGate برای ارسال در Host Header
 async function fetchVpnGateServers() {
   const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
   const text = await res.text();
+
   const lines = text.replace(/\r/g, "").split("\n");
   const servers = [];
 
@@ -389,41 +388,41 @@ async function fetchVpnGateServers() {
 
     try {
       const cols = trimmed.split(",");
-      const hostName = cols[0]; // مانند vg12345678
+      const hostName = cols[0]; // نام هاست مانند vg12345678
       const ip = cols[1];
       const countryLong = cols[5] || "Unknown";
 
-      if (!ip) continue;
+      if (!hostName && !ip) continue;
 
-      // ساخت دامین دقیق opengw.net برای SNI و Host Header
-      const domain = hostName ? `${hostName.toLowerCase()}.opengw.net` : ip;
+      // ساخت آدرس دامنه opengw.net جهت تست و ذخیره به جای IP
+      const domainAddress = hostName ? `${hostName.toLowerCase()}.opengw.net` : ip.trim();
 
       servers.push({
-        uri: ip.trim(),
-        domain: domain.trim(),
+        uri: domainAddress, // آدرس دامنه
         name: countryLong.trim(),
         port: SSTP_PORT,
         ping: -1,
       });
-    } catch {}
+    } catch {
+      // خط نادرست
+    }
   }
   return servers;
 }
 
-
-function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = 6000) {
+function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let settled = false;
     let buffer = "";
     const start = Date.now();
 
-    const host = typeof serverOrHost === "object" ? serverOrHost.uri : serverOrHost;
-    const domain = typeof serverOrHost === "object" ? serverOrHost.domain || host : host;
+    const hostAddress = typeof serverOrHost === "object" ? serverOrHost.uri : serverOrHost;
+    const targetPort = typeof serverOrHost === "object" ? (serverOrHost.port || port) : port;
 
     const socket = tls.connect({
-      host,
-      port,
-      servername: domain, // تنظیم SNI بر اساس دامین
+      host: hostAddress, // اتصال به آدرس دامنه
+      port: targetPort,  // پورت target
+      servername: hostAddress, // SNI بر اساس آدرس دامنه
       rejectUnauthorized: false,
       minVersion: "TLSv1",
       timeout: timeoutMs,
@@ -434,16 +433,16 @@ function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = 6000) {
       settled = true;
       socket.destroy();
       if (!ok && process.env.SSTP_DEBUG === "1") {
-        console.log(`    [debug ${host}:${port}] ${reason}`);
+        console.log(`    [debug ${hostAddress}:${targetPort}] ${reason}`);
       }
       resolve(ok ? Date.now() - start : null);
     };
 
     socket.on("secureConnect", () => {
-      // استفاده از domain در Host header به جای IP
+      // ارسال آدرس دامنه در Host Header
       const req =
         `SSTP_DUPLEX_POST /sra_{${SSTP_GUID}}/ HTTP/1.1\r\n` +
-        `Host: ${domain}\r\n` +
+        `Host: ${hostAddress}\r\n` +
         `Content-Length: 18446744073709551615\r\n` +
         `User-Agent: SSTP Client\r\n\r\n`;
       socket.write(req);
@@ -478,9 +477,9 @@ async function testAllSstp(servers, concurrency) {
       tested.add(dedupKey(server.uri));
       if (ping != null) {
         healthy.push({ ...server, ping });
-        console.log(`✅ [SSTP] سالم (${ping}ms): ${server.name} (${server.uri})`);
+        console.log(`✅ [SSTP] سالم (${ping}ms): ${server.name} (${server.uri}:${server.port})`);
       } else {
-        console.log(`❌ [SSTP] ناسالم: ${server.name} (${server.uri})`);
+        console.log(`❌ [SSTP] ناسالم: ${server.name} (${server.uri}:${server.port})`);
       }
     }
   }
@@ -525,7 +524,7 @@ async function uploadToCloudflare(url, servers) {
   const body = JSON.stringify(
     unique.map((s, i) => ({
       id: String(i),
-      address: s.uri.trim(),
+      address: s.uri.trim(), // ذخیره دامنه به‌جای IP
       port: s.port ?? "v2ray",
       country: s.name,
       ping: s.ping ?? -1,
@@ -613,7 +612,7 @@ async function main() {
   const tested = new Set([...v2rayResult.tested, ...sstpResult.tested]);
 
   if (healthy.length === 0) {
-    console.log("هیچ سرور سالمی (نه V2Ray نه SSTP) پیدا نشد — لیست کلودفلر دست‌نخورده می‌ماند.");
+    console.log("هیچ سرور سالمی پیدا نشد — لیست کلودفلر دست‌نخورده می‌ماند.");
     return;
   }
 
