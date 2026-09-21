@@ -410,7 +410,6 @@ async function fetchVpnGateServers() {
   return servers;
 }
 
-const SSTP_CONCURRENCY = 8; // حداکثر ۸ اتصال هم‌زمان
 
 function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = 6000) {
   return new Promise((resolve) => {
