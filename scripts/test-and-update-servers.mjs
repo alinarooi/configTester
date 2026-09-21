@@ -832,10 +832,6 @@ async function fetchVpnGateServers() {
       const cols =
         line.split(",");
 
-      // -------------------------------------------------------------
-      // ستون‌های اصلی VPNGate
-      // -------------------------------------------------------------
-
       let rawHostName =
         String(
           cols[0] || ""
@@ -851,26 +847,10 @@ async function fetchVpnGateServers() {
           cols[5] || "Unknown"
         ).trim();
 
-      // -------------------------------------------------------------
-      // hostname را تمیز کن
-      // -------------------------------------------------------------
-
       if (!rawHostName) {
         continue;
       }
 
-      /*
-       * بعضی خروجی‌های VPNGate hostname را کوتاه می‌دهند:
-       *
-       * public-vpn-66
-       *
-       * در این حالت باید .opengw.net اضافه شود.
-       *
-       * اگر hostname از قبل کامل باشد، دست نمی‌زنیم:
-       *
-       * public-vpn-66.opengw.net
-       * vpn123456789.opengw.net
-       */
       let hostName =
         rawHostName;
 
@@ -880,10 +860,6 @@ async function fetchVpnGateServers() {
         hostName =
           `${hostName}.opengw.net`;
       }
-
-      // -------------------------------------------------------------
-      // بررسی hostname
-      // -------------------------------------------------------------
 
       if (
         !/^[a-zA-Z0-9.-]+$/.test(
@@ -896,10 +872,6 @@ async function fetchVpnGateServers() {
 
         continue;
       }
-
-      // -------------------------------------------------------------
-      // دریافت OpenVPN config
-      // -------------------------------------------------------------
 
       const ovpnBase64 =
         cols
@@ -923,23 +895,7 @@ async function fetchVpnGateServers() {
         }
       }
 
-      // -------------------------------------------------------------
-      // پیدا کردن پورت TCP
-      // -------------------------------------------------------------
-
       let port = null;
-
-      /*
-       * نمونه‌های OpenVPN:
-       *
-       * remote public-vpn-158.opengw.net 443
-       *
-       * یا:
-       *
-       * remote vpn123456789.opengw.net 1556
-       *
-       * ما فقط remoteهایی را می‌خواهیم که پروتکل TCP دارند.
-       */
 
       const remoteLines =
         ovpnConfig.match(
@@ -974,13 +930,6 @@ async function fetchVpnGateServers() {
           continue;
         }
 
-        /*
-         * اگر remote به شکل زیر باشد:
-         *
-         * remote host 443 tcp
-         *
-         * این بهترین حالت است.
-         */
         if (
           parts[3] &&
           parts[3].toLowerCase() === "tcp"
@@ -991,13 +940,6 @@ async function fetchVpnGateServers() {
           break;
         }
 
-        /*
-         * اگر پروتکل مشخص نشده بود،
-         * فعلاً پورت را به‌عنوان TCP candidate
-         * در نظر می‌گیریم.
-         *
-         * چون SSTP خودش TCP است.
-         */
         if (
           port === null
         ) {
@@ -1006,21 +948,9 @@ async function fetchVpnGateServers() {
         }
       }
 
-      // -------------------------------------------------------------
-      // اگر پورت از config پیدا نشد
-      // -------------------------------------------------------------
-
       if (
         port === null
       ) {
-        /*
-         * بسیاری از سرورهای public-vpn
-         * از 443 برای SSTP استفاده می‌کنند.
-         *
-         * اما به جای اینکه کورکورانه همه را 443 فرض کنیم،
-         * فقط وقتی hostname از نوع public-vpn باشد
-         * fallback می‌کنیم.
-         */
         if (
           hostName.startsWith(
             "public-vpn-"
@@ -1028,17 +958,9 @@ async function fetchVpnGateServers() {
         ) {
           port = 443;
         } else {
-          /*
-           * برای سایر سرورها بدون پورت واقعی
-           * تست SSTP انجام نمی‌دهیم.
-           */
           continue;
         }
       }
-
-      // -------------------------------------------------------------
-      // اعتبارسنجی پورت
-      // -------------------------------------------------------------
 
       if (
         !Number.isInteger(port) ||
@@ -1048,15 +970,7 @@ async function fetchVpnGateServers() {
         continue;
       }
 
-      // -------------------------------------------------------------
-      // ساخت server object
-      // -------------------------------------------------------------
-
       servers.push({
-        /*
-         * مهم:
-         * uri باید hostname کامل باشد.
-         */
         uri:
           hostName,
 
@@ -1070,9 +984,6 @@ async function fetchVpnGateServers() {
 
         hostName,
 
-        /*
-         * برای debug
-         */
         rawHostName,
 
         ping: -1,
@@ -1084,10 +995,6 @@ async function fetchVpnGateServers() {
       );
     }
   }
-
-  // -------------------------------------------------------------
-  // حذف duplicate
-  // -------------------------------------------------------------
 
   const unique = [];
   const seen = new Set();
@@ -1116,15 +1023,12 @@ async function fetchVpnGateServers() {
     `VPNGate parser: ${unique.length} سرور SSTP معتبر استخراج شد.`
   );
 
-  /*
-   * چند نمونه برای اطمینان از درست بودن parser
-   */
   for (
     const server
     of unique.slice(0, 5)
   ) {
     console.log(
-      `   [VPNGate] ${server.hostName}:${server.port} (${server.ip})`
+      `    [VPNGate] ${server.hostName}:${server.port} (${server.ip})`
     );
   }
 
@@ -1167,7 +1071,7 @@ async function testSstpReal(
       ) {
         if (ok) {
           console.log(
-            `   [SSTP debug] ${host}:${port} -> ${reason}`
+            `    [SSTP debug] ${host}:${port} -> ${reason}`
           );
         } else {
           const shortLog =
@@ -1176,7 +1080,7 @@ async function testSstpReal(
               .slice(-1200);
 
           console.log(
-            `   [SSTP debug] ${host}:${port} -> ${reason}` +
+            `    [SSTP debug] ${host}:${port} -> ${reason}` +
             (
               shortLog
                 ? ` | ${shortLog}`
@@ -1186,7 +1090,6 @@ async function testSstpReal(
         }
       }
 
-      // kill کردن sstpc و pppd
       if (child?.pid) {
         try {
           process.kill(
@@ -1213,7 +1116,6 @@ async function testSstpReal(
         }
       }
 
-      // اگر PPP باقی مانده بود
       if (pppInterface) {
         try {
           await execFileP(
@@ -1259,7 +1161,6 @@ async function testSstpReal(
 
       `${host}:${port}`,
 
-      // PPP options
       "usepeerdns",
       "require-mschap-v2",
       "noauth",
@@ -1326,7 +1227,6 @@ async function testSstpReal(
       }
     );
 
-    // منتظر PPP
     const deadline =
       Date.now() + timeoutMs;
 
@@ -1410,10 +1310,6 @@ async function testSstpReal(
         "PPP interface ساخته نشد / timeout"
       );
     }
-
-    // ---------------------------------------------------------------
-    // تست واقعی اینترنت از داخل PPP
-    // ---------------------------------------------------------------
 
     if (SSTP_INTERNET_TEST) {
       const curlStart =
@@ -1549,7 +1445,7 @@ function testSstpHandshake(
             process.env.SSTP_DEBUG === "1"
           ) {
             console.log(
-              `   [SSTP debug] ${host}:${port} ${reason}`
+              `    [SSTP debug] ${host}:${port} ${reason}`
             );
           }
 
@@ -1739,11 +1635,7 @@ async function testAllSstp(
   await Promise.all(
     Array.from(
       {
-        length:
-          Math.max(
-            1,
-            concurrency
-          ),
+        length: concurrency,
       },
       worker
     )
@@ -1761,443 +1653,127 @@ async function testAllSstp(
 }
 
 // ---------------------------------------------------------------------
-// Merge
-// ---------------------------------------------------------------------
-
-function mergeResults(
-  remoteList,
-  testedUris,
-  healthyResults
-) {
-  const healthyByKey =
-    new Map(
-      healthyResults.map(
-        (s) => [
-          dedupKey(s.uri),
-          s,
-        ]
-      )
-    );
-
-  const kept =
-    remoteList
-      .map(
-        (existing) => {
-          const key =
-            dedupKey(
-              existing.uri
-            );
-
-          if (
-            healthyByKey.has(key)
-          ) {
-            return healthyByKey.get(
-              key
-            );
-          }
-
-          if (
-            testedUris.has(key)
-          ) {
-            return null;
-          }
-
-          return existing;
-        }
-      )
-      .filter(Boolean);
-
-  const keptKeys =
-    new Set(
-      kept.map(
-        (s) =>
-          dedupKey(s.uri)
-      )
-    );
-
-  const newlyAdded =
-    healthyResults.filter(
-      (s) =>
-        !keptKeys.has(
-          dedupKey(s.uri)
-        )
-    );
-
-  return [
-    ...kept,
-    ...newlyAdded,
-  ];
-}
-
-// ---------------------------------------------------------------------
-// آپلود به Cloudflare
-// ---------------------------------------------------------------------
-
-async function uploadToCloudflare(
-  url,
-  servers
-) {
-  const unique = [];
-  const seen = new Set();
-
-  for (const s of servers) {
-    const key =
-      dedupKey(s.uri);
-
-    if (
-      !seen.has(key)
-    ) {
-      seen.add(key);
-      unique.push(s);
-    }
-  }
-
-  const body =
-    JSON.stringify(
-      unique.map(
-        (s, i) => ({
-          id: String(i),
-
-          address:
-            s.uri.trim(),
-
-          port:
-            s.port ?? "v2ray",
-
-          country:
-            s.name,
-
-          ping:
-            s.ping ?? -1,
-
-          icon:
-            "https://raw.githubusercontent.com/alinarooi/icons/main/global.png",
-        })
-      )
-    );
-
-  const headers = {
-    "Content-Type":
-      "application/json; charset=UTF-8",
-  };
-
-  const res =
-    await fetch(
-      url,
-      {
-        method: "POST",
-        headers,
-        body,
-
-        signal:
-          AbortSignal.timeout(
-            15000
-          ),
-      }
-    );
-
-  return res.ok;
-}
-
-// ---------------------------------------------------------------------
-// MAIN
+// اجرای اصلی اسکریپت (Main)
 // ---------------------------------------------------------------------
 
 async function main() {
-  console.log(
-    "در حال دریافت لیست‌ها..."
-  );
+  console.log("🚀 شروع فرایند تست و بروزرسانی سرورها...");
 
-  const [
-    cfServers,
-    ghServers,
-  ] = await Promise.all([
-    fetchCloudflareServers(
-      CF_ALL_URL
-    ).catch((e) => {
-      console.error(
-        "خطا در دریافت کلودفلر:",
-        e.message
-      );
-
-      return [];
-    }),
-
-    fetchGithubConfigs(
-      GH_RAW_URL
-    ).catch((e) => {
-      console.error(
-        "خطا در دریافت گیت‌هاب:",
-        e.message
-      );
-
-      return [];
-    }),
-  ]);
-
-  console.log(
-    `کلودفلر: ${cfServers.length} | ` +
-    `گیت‌هاب: ${ghServers.length}`
-  );
-
-  // ---------------------------------------------------------------
-  // ترکیب V2Ray
-  // ---------------------------------------------------------------
-
-  const seen =
-    new Set();
-
-  const combined =
-    [
-      ...cfServers,
-      ...ghServers,
-    ]
-      .filter(
-        (s) => {
-          const key =
-            dedupKey(s.uri);
-
-          if (
-            seen.has(key)
-          ) {
-            return false;
-          }
-
-          seen.add(key);
-
-          return true;
-        }
-      )
-      .slice(
-        0,
-        MAX_CANDIDATES
-      );
-
-  console.log(
-    `تعداد یکتا برای تست: ${combined.length}`
-  );
-
-  // ---------------------------------------------------------------
-  // تست V2Ray
-  // ---------------------------------------------------------------
-
-  let v2rayResult = {
-    healthy: [],
-    tested: new Set(),
-  };
-
-  if (
-    combined.length > 0
-  ) {
-    console.log(
-      `شروع تست V2Ray با ${CONCURRENCY} پروسه‌ی هم‌زمان...`
-    );
-
-    v2rayResult =
-      await testAll(
-        combined,
-        CONCURRENCY
-      );
-
-    console.log(
-      `نتیجه‌ی V2Ray: ` +
-      `${v2rayResult.healthy.length} سالم از ` +
-      `${v2rayResult.tested.size} تست‌شده.`
-    );
-  } else {
-    console.log(
-      "هیچ کاندیدای V2Ray ای برای تست نبود."
-    );
+  // ۱. دریافت لیست سرورهای فعلی موجود در Worker
+  console.log("📥 در حال دریافت سرورهای فعلی از Cloudflare...");
+  let currentServers = [];
+  try {
+    currentServers = await fetchCloudflareServers(CF_ALL_URL);
+    console.log(`تعداد سرورهای فعلی کلودفلر: ${currentServers.length}`);
+  } catch (e) {
+    console.warn(`⚠️ خطا در دریافت لیست فعلی کلودفلر: ${e.message}`);
   }
 
-  // ---------------------------------------------------------------
-  // VPNGate / SSTP
-  // ---------------------------------------------------------------
+  // ۲. دریافت کاندیداهای جدید از GitHub و VPNGate
+  console.log("📥 در حال دریافت لیست‌های جدید...");
+  const ghServers = await fetchGithubConfigs(GH_RAW_URL).catch((e) => {
+    console.error(`⚠️ خطا در دریافت کانفیگ‌های GitHub: ${e.message}`);
+    return [];
+  });
 
-  console.log(
-    "در حال دریافت لیست VPNGate..."
+  const vpnGateServers = await fetchVpnGateServers().catch((e) => {
+    console.error(`⚠️ خطا در دریافت سرورهای VPNGate: ${e.message}`);
+    return [];
+  });
+
+  // ۳. جداکردن سرورها بر اساس نوع (V2Ray / SSTP)
+  const currentV2ray = currentServers.filter((s) => s.port === "v2ray");
+  const currentSstp = currentServers.filter((s) => s.port !== "v2ray");
+
+  // ترکیب و یکتاکردن سرورهای V2Ray
+  const v2rayMap = new Map();
+  for (const s of [...ghServers, ...currentV2ray]) {
+    const key = dedupKey(s.uri);
+    if (!v2rayMap.has(key)) {
+      v2rayMap.set(key, s);
+    }
+  }
+  const v2rayCandidates = Array.from(v2rayMap.values()).slice(0, MAX_CANDIDATES);
+
+  // ترکیب و یکتاکردن سرورهای SSTP
+  const sstpMap = new Map();
+  for (const s of [...vpnGateServers, ...currentSstp]) {
+    const key = `${s.hostName || s.uri}:${s.port}`;
+    if (!sstpMap.has(key)) {
+      sstpMap.set(key, s);
+    }
+  }
+  const sstpCandidates = Array.from(sstpMap.values()).slice(0, MAX_SSTP_CANDIDATES);
+
+  console.log(`📊 آماده‌سازی تست: ${v2rayCandidates.length} سرور V2Ray و ${sstpCandidates.length} سرور SSTP`);
+
+  // ۴. تست موازی V2Ray
+  console.log("\n🧪 شروع تست سرورهای V2Ray...");
+  const { healthy: healthyV2ray, tested: testedV2rayKeys } = await testAll(
+    v2rayCandidates,
+    CONCURRENCY
   );
 
-  const vpnGateServers =
-    await fetchVpnGateServers()
-      .catch((e) => {
-        console.error(
-          "خطا در دریافت VPNGate:",
-          e.message
-        );
-
-        return [];
-      });
-
-  console.log(
-    `VPNGate: ${vpnGateServers.length} سرور دریافت شد.`
+  // ۵. تست موازی SSTP
+  console.log("\n🧪 شروع تست سرورهای SSTP...");
+  const { healthy: healthySstp, tested: testedSstpKeys } = await testAllSstp(
+    sstpCandidates,
+    SSTP_CONCURRENCY
   );
 
-  const seenSstp =
-    new Set();
+  // ۶. ادغام سرورهای سالم
+  const finalHealthy = [...healthyV2ray, ...healthySstp];
 
-  const sstpCandidates =
-    vpnGateServers
-      .filter(
-        (s) => {
-          const key =
-            dedupKey(s.uri);
+  // اگر سروری در لیست قبلی بوده اما در این نوبت تست نشده، آن را نگه می‌داریم
+  for (const s of currentServers) {
+    const isV2ray = s.port === "v2ray";
+    const key = isV2ray ? dedupKey(s.uri) : `${s.hostName || s.uri}:${s.port}`;
+    const wasTested = isV2ray ? testedV2rayKeys.has(key) : testedSstpKeys.has(key);
 
-          if (
-            seenSstp.has(key)
-          ) {
-            return false;
-          }
-
-          seenSstp.add(key);
-
-          return true;
-        }
-      )
-      .slice(
-        0,
-        MAX_SSTP_CANDIDATES
-      );
-
-  let sstpResult = {
-    healthy: [],
-    tested: new Set(),
-  };
-
-  if (
-    sstpCandidates.length > 0
-  ) {
-    console.log(
-      `شروع تست SSTP با ` +
-      `${SSTP_CONCURRENCY} اتصال هم‌زمان ` +
-      `روی ${sstpCandidates.length} کاندیدا...`
-    );
-
-    sstpResult =
-      await testAllSstp(
-        sstpCandidates,
-        SSTP_CONCURRENCY
-      );
-
-    console.log(
-      `نتیجه‌ی SSTP: ` +
-      `${sstpResult.healthy.length} سالم از ` +
-      `${sstpResult.tested.size} تست‌شده.`
-    );
-  } else {
-    console.log(
-      "هیچ کاندیدای SSTP ای برای تست نبود."
-    );
+    if (!wasTested) {
+      finalHealthy.push(s);
+    }
   }
 
-  // ---------------------------------------------------------------
-  // Merge
-  // ---------------------------------------------------------------
+  console.log(`\n🎉 مجموع سرورهای سالم نهایی: ${finalHealthy.length}`);
 
-  const healthy = [
-    ...v2rayResult.healthy,
-    ...sstpResult.healthy,
-  ];
-
-  const tested =
-    new Set([
-      ...v2rayResult.tested,
-      ...sstpResult.tested,
-    ]);
-
-  if (
-    healthy.length === 0
-  ) {
-    console.log(
-      "هیچ سرور سالمی (نه V2Ray نه SSTP) پیدا نشد — " +
-      "لیست کلودفلر دست‌نخورده می‌ماند."
-    );
-
-    return;
-  }
-
-  console.log(
-    "دریافت مجدد لیست کلودفلر برای merge امن..."
-  );
-
-  const freshRemote =
-    await fetchCloudflareServers(
-      CF_ALL_URL
-    ).catch(
-      () => cfServers
-    );
-
-  const merged =
-    mergeResults(
-      freshRemote,
-      tested,
-      healthy
-    );
-
-  // ---------------------------------------------------------------
-  // محافظ کاهش شدید لیست
-  // ---------------------------------------------------------------
-
-  if (
-    freshRemote.length > 0
-  ) {
-    const ratio =
-      merged.length /
-      freshRemote.length;
-
-    if (
-      ratio < MIN_KEEP_RATIO
-    ) {
+  // ۷. بررسی مکانیزم محافظتی (MIN_KEEP_RATIO)
+  if (currentServers.length > 0) {
+    const minRequired = Math.floor(currentServers.length * MIN_KEEP_RATIO);
+    if (finalHealthy.length < minRequired) {
       console.error(
-        `⚠️ آپلود متوقف شد: ` +
-        `لیست نهایی (${merged.length}) کمتر از ` +
-        `${Math.round(
-          MIN_KEEP_RATIO * 100
-        )}% لیست فعلی ` +
-        `(${freshRemote.length}) است. ` +
-        `این می‌تواند نشانه‌ی یک مشکل شبکه‌ی runner ` +
-        `یا باگ باشد، نه واقعاً خراب بودن این‌همه سرور. ` +
-        `برای عبور از این محافظ، MIN_KEEP_RATIO را کم کنید.`
+        `❌ تعداد سرورهای سالم (${finalHealthy.length}) کمتر از حد مجاز (${minRequired}) است. به روزرسانی لغو شد.`
       );
-
       process.exit(1);
     }
   }
 
-  // ---------------------------------------------------------------
-  // Upload
-  // ---------------------------------------------------------------
+  // ۸. مپ کردن داده‌ها به فرمت خروجی Cloudflare Worker
+  const payload = finalHealthy.map((s) => ({
+    address: s.uri,
+    country: s.name,
+    port: s.port,
+    ping: s.ping,
+  }));
 
-  console.log(
-    `آپلود ${merged.length} سرور نهایی به کلودفلر...`
-  );
+  // ۹. ارسال لیست به Worker
+  console.log("📤 در حال ارسال داده‌های جدید به Cloudflare Worker...");
+  const updateRes = await fetch(CF_UPDATE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 
-  const ok =
-    await uploadToCloudflare(
-      CF_UPDATE_URL,
-      merged
-    );
-
-  console.log(
-    ok
-      ? "✅ آپلود موفق بود."
-      : "❌ آپلود ناموفق بود."
-  );
-
-  if (!ok) {
-    process.exit(1);
+  if (!updateRes.ok) {
+    throw new Error(`خطا در آپدیت Worker: کد HTTP ${updateRes.status}`);
   }
+
+  console.log("✅ به‌روزرسانی با موفقیت انجام شد!");
 }
 
-// ---------------------------------------------------------------------
-// اجرای برنامه
-// ---------------------------------------------------------------------
-
-main().catch((e) => {
-  console.error(
-    "خطای کلی:",
-    e
-  );
-
+main().catch((err) => {
+  console.error("💥 خطای غیرمنتظره در اجرای اسکریپت:", err);
   process.exit(1);
 });
