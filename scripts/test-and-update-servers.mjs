@@ -375,39 +375,7 @@ async function testAll(servers, concurrency) {
 // VPNGate / SSTP
 //---------------------------------------------------------------------
 
-// ۱. استخراج دامین واقعی VPNGate برای ارسال در Host Header
-async function fetchVpnGateServers() {
-  const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
-  const text = await res.text();
-  const lines = text.replace(/\r/g, "").split("\n");
-  const servers = [];
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("*")) continue;
-
-    try {
-      const cols = trimmed.split(",");
-      const hostName = cols[0]; // مانند vg12345678
-      const ip = cols[1];
-      const countryLong = cols[5] || "Unknown";
-
-      if (!ip) continue;
-
-      // ساخت دامین دقیق opengw.net برای SNI و Host Header
-      const domain = hostName ? `${hostName.toLowerCase()}.opengw.net` : ip;
-
-      servers.push({
-        uri: ip.trim(),
-        domain: domain.trim(),
-        name: countryLong.trim(),
-        port: SSTP_PORT,
-        ping: -1,
-      });
-    } catch {}
-  }
-  return servers;
-}
 // ۱. استخراج دامین واقعی VPNGate برای ارسال در Host Header
 async function fetchVpnGateServers() {
   const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
