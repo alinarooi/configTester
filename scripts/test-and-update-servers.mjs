@@ -796,7 +796,6 @@ const SSTP_TEST_URL =
   process.env.SSTP_TEST_URL ||
   "https://www.gstatic.com/generate_204";
 
-
 async function fetchVpnGateServers() {
   const res =
     await fetch(
@@ -833,6 +832,7 @@ async function fetchVpnGateServers() {
       const cols =
         line.split(",");
 
+      
       let rawHostName =
         String(
           cols[0] || ""
@@ -852,6 +852,7 @@ async function fetchVpnGateServers() {
         continue;
       }
 
+    
       let hostName =
         rawHostName;
 
@@ -862,14 +863,20 @@ async function fetchVpnGateServers() {
           `${hostName}.opengw.net`;
       }
 
+      
       if (
         !/^[a-zA-Z0-9.-]+$/.test(
           hostName
         )
       ) {
+        console.log(
+          `⚠️ hostname نامعتبر VPNGate: ${hostName}`
+        );
+
         continue;
       }
 
+      
       const ovpnBase64 =
         cols
           .slice(14)
@@ -892,7 +899,11 @@ async function fetchVpnGateServers() {
         }
       }
 
+      
+
       let port = null;
+
+    
 
       const remoteLines =
         ovpnConfig.match(
@@ -927,6 +938,7 @@ async function fetchVpnGateServers() {
           continue;
         }
 
+    
         if (
           parts[3] &&
           parts[3].toLowerCase() === "tcp"
@@ -937,6 +949,7 @@ async function fetchVpnGateServers() {
           break;
         }
 
+    
         if (
           port === null
         ) {
@@ -945,9 +958,11 @@ async function fetchVpnGateServers() {
         }
       }
 
+      
       if (
         port === null
       ) {
+      
         if (
           hostName.startsWith(
             "public-vpn-"
@@ -968,6 +983,7 @@ async function fetchVpnGateServers() {
       }
 
       servers.push({
+        
         uri:
           hostName,
 
@@ -993,6 +1009,7 @@ async function fetchVpnGateServers() {
     }
   }
 
+  
   const unique = [];
   const seen = new Set();
 
@@ -1016,8 +1033,23 @@ async function fetchVpnGateServers() {
     );
   }
 
+  console.log(
+    `VPNGate parser: ${unique.length} سرور SSTP معتبر استخراج شد.`
+  );
+
+  for (
+    const server
+    of unique.slice(0, 5)
+  ) {
+    console.log(
+      `   [VPNGate] ${server.hostName}:${server.port} (${server.ip})`
+    );
+  }
+
   return unique;
 }
+
+
 
 
 async function testSstpReal(
