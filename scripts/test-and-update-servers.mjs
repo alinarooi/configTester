@@ -1,4 +1,4 @@
-name: Test & Update Server List
+
 
 on:
   schedule:
