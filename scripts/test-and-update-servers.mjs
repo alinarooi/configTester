@@ -1,14 +1,5 @@
 /**
  * تست واقعی لیست سرورها با باینری رسمی Xray-core و آپدیت لیست کلودفلر.
- *
- * برخلاف نسخه‌ی اندرویدی (که به‌خاطر runtime مشترک Go در JNI فقط
- * می‌توانست یک هسته را در آنِ واحد اجرا کند)، اینجا هر تست یک پروسه‌ی
- * جدا و مستقل از سیستم‌عامل است (spawn شده با child_process)، پس
- * می‌توانیم چند ده‌تا را واقعاً موازی اجرا کنیم.
- *
- * محدودیت مهم: این تست از دیتاسنتر GitHub Actions (آمریکا/اروپا) اجرا
- * می‌شود، نه از داخل ایران. یعنی فقط سرورهای "مرده/منقضی" را می‌گیرد؛
- * فیلترینگ خاص یک اپراتور ایرانی را نمی‌سنجد.
  */
 
 import { spawn, execFile } from "node:child_process";
@@ -38,18 +29,11 @@ const BASE_PORT = 20000;
 // --- VPNGate / SSTP ---
 const VPNGATE_API_URL = "http://www.vpngate.net/api/iphone/";
 const SSTP_PORT = 443;
-const SSTP_GUID = "386A22A6-4C2E-49A2-8926-2E10E5A73711"; // GUID استاندارد MS-SSTP
+const SSTP_GUID = "386a22a6-4c2e-49a2-8926-2e10e5a73711"; // GUID استاندارد MS-SSTP با حروف کوچک
 const MAX_SSTP_CANDIDATES = Number(process.env.MAX_SSTP_CANDIDATES || 200);
-const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 30);
-const SSTP_TIMEOUT_MS = Number(process.env.SSTP_TIMEOUT_MS || 6000);
+const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 12); // هم‌زمانی بهینه جهت جلوگیری از Drop
+const SSTP_TIMEOUT_MS = Number(process.env.SSTP_TIMEOUT_MS || 5000);
 
-/**
- * محافظ در برابر حذف ناگهانی: چون Worker فعلی هیچ اعتبارسنجی روی بدنه‌ی
- * درخواست ندارد (هر آرایه‌ای را می‌پذیرد و جایگزین می‌کند)، این چک باید
- * اینجا در اسکریپت انجام شود. اگر لیست نهایی به‌طرز غیرمنتظره‌ای خیلی
- * کوچک‌تر از لیست فعلی شود (مثلاً به‌خاطر یک باگ یا قطعی موقت شبکه‌ی
- * runner)، آپلود متوقف می‌شود تا به‌جای یک بازنویسی مخرب، دستی بررسی شود.
- */
 const MIN_KEEP_RATIO = Number(process.env.MIN_KEEP_RATIO || 0.5);
 
 function requireEnv(name) {
@@ -81,7 +65,6 @@ async function fetchGithubConfigs(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
   let text = await res.text();
 
-  // اگر کل محتوا base64 بود، decode کن
   const maybeDecoded = tryBase64Decode(text.trim());
   if (maybeDecoded && maybeDecoded.includes("://")) {
     text = maybeDecoded;
@@ -308,14 +291,14 @@ function buildFullConfig(outbound, socksPort) {
 }
 
 // ---------------------------------------------------------------------
-// تست یک سرور: spawn پروسه‌ی xray + curl از طریق SOCKS
+// تست یک سرور V2Ray
 // ---------------------------------------------------------------------
 async function testOne(server, port) {
   let outbound;
   try {
     outbound = parseLinkToOutbound(server.uri);
   } catch {
-    return null; // لینک پشتیبانی‌نشده یا ناقص
+    return null;
   }
 
   const configPath = path.join(os.tmpdir(), `xray-test-${port}.json`);
@@ -328,7 +311,6 @@ async function testOne(server, port) {
   try {
     await sleep(CORE_WARMUP_MS);
 
-    // بررسی زنده بودن پروسه Xray قبل از تست
     if (child.exitCode !== null) {
       return null;
     }
@@ -360,9 +342,6 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ---------------------------------------------------------------------
-// اجرای موازی با محدودیت تعداد هم‌زمان
-// ---------------------------------------------------------------------
 async function testAll(servers, concurrency) {
   const healthy = [];
   const tested = new Set();
@@ -396,9 +375,6 @@ async function testAll(servers, concurrency) {
 // VPNGate / SSTP
 // ---------------------------------------------------------------------
 
-/**
- * دریافت لیست VPNGate با فیلتر هدرها و تنظیم دامنه SNI
- */
 async function fetchVpnGateServers() {
   const res = await fetch(VPNGATE_API_URL, { signal: AbortSignal.timeout(15000) });
   const text = await res.text();
@@ -435,9 +411,6 @@ async function fetchVpnGateServers() {
   return servers;
 }
 
-/**
- * تست دست‌دهی استاندارد SSTP با GUID مایکروسافت و ارسال SNI
- */
 function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let settled = false;
@@ -452,6 +425,7 @@ function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
       port,
       servername: domain,
       rejectUnauthorized: false,
+      minVersion: "TLSv1",
       timeout: timeoutMs,
     });
 
@@ -468,8 +442,8 @@ function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
     socket.on("secureConnect", () => {
       const req =
         `SSTP_DUPLEX_POST /sra_{${SSTP_GUID}}/ HTTP/1.1\r\n` +
-        `Content-Length: 18446744073709551615\r\n` +
         `Host: ${domain}\r\n` +
+        `Content-Length: 18446744073709551615\r\n` +
         `User-Agent: SSTP Client\r\n\r\n`;
       socket.write(req);
     });
@@ -478,7 +452,7 @@ function testSstp(serverOrHost, port = SSTP_PORT, timeoutMs = SSTP_TIMEOUT_MS) {
       buffer += chunk.toString("latin1");
       if (buffer.includes("\r\n\r\n") || buffer.length > 512) {
         const firstLine = buffer.split("\r\n")[0];
-        finish(/^HTTP\/1\.1 200/.test(buffer), `پاسخ غیرمنتظره: "${firstLine}"`);
+        finish(/^HTTP\/1\.[01] 200/.test(buffer), `پاسخ غیرمنتظره: "${firstLine}"`);
       }
     });
 
@@ -516,7 +490,7 @@ async function testAllSstp(servers, concurrency) {
 }
 
 // ---------------------------------------------------------------------
-// merge: فقط سرورهای واقعاً تست‌شده حذف/به‌روز می‌شوند
+// merge و آپلود
 // ---------------------------------------------------------------------
 function mergeResults(remoteList, testedUris, healthyResults) {
   const healthyByKey = new Map(healthyResults.map((s) => [dedupKey(s.uri), s]));
@@ -525,8 +499,8 @@ function mergeResults(remoteList, testedUris, healthyResults) {
     .map((existing) => {
       const key = dedupKey(existing.uri);
       if (healthyByKey.has(key)) return healthyByKey.get(key);
-      if (testedUris.has(key)) return null; // تست شد و رد شد
-      return existing; // تست نشد → دست‌نخورده
+      if (testedUris.has(key)) return null;
+      return existing;
     })
     .filter(Boolean);
 
@@ -591,7 +565,7 @@ async function main() {
     })
     .slice(0, MAX_CANDIDATES);
 
-  console.log(`تعداد یکتا برای تست: ${combined.length}`);
+  console.log(`تعداد یکتا برای تست V2Ray: ${combined.length}`);
 
   let v2rayResult = { healthy: [], tested: new Set() };
   if (combined.length > 0) {
@@ -651,8 +625,7 @@ async function main() {
     if (ratio < MIN_KEEP_RATIO) {
       console.error(
         `⚠️ آپلود متوقف شد: لیست نهایی (${merged.length}) کمتر از ` +
-        `${Math.round(MIN_KEEP_RATIO * 100)}% لیست فعلی (${freshRemote.length}) است. ` +
-        `این می‌تواند نشانه‌ی یک مشکل شبکه‌ی runner یا باگ باشد.`
+        `${Math.round(MIN_KEEP_RATIO * 100)}% لیست فعلی (${freshRemote.length}) است.`
       );
       process.exit(1);
     }
