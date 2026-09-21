@@ -795,9 +795,7 @@ const SSTP_TEST_URL =
   process.env.SSTP_TEST_URL ||
   "https://www.gstatic.com/generate_204";
 
-/**
- * دریافت VPNGate
- */
+
 async function fetchVpnGateServers() {
   const res =
     await fetch(
@@ -834,7 +832,11 @@ async function fetchVpnGateServers() {
       const cols =
         line.split(",");
 
-      const hostName =
+      // -------------------------------------------------------------
+      // ستون‌های اصلی VPNGate
+      // -------------------------------------------------------------
+
+      let rawHostName =
         String(
           cols[0] || ""
         ).trim();
@@ -849,45 +851,194 @@ async function fetchVpnGateServers() {
           cols[5] || "Unknown"
         ).trim();
 
-      const address =
-        hostName || ip;
+      // -------------------------------------------------------------
+      // hostname را تمیز کن
+      // -------------------------------------------------------------
 
-      if (!address) {
+      if (!rawHostName) {
         continue;
       }
 
-      // OpenVPN config
+      /*
+       * بعضی خروجی‌های VPNGate hostname را کوتاه می‌دهند:
+       *
+       * public-vpn-66
+       *
+       * در این حالت باید .opengw.net اضافه شود.
+       *
+       * اگر hostname از قبل کامل باشد، دست نمی‌زنیم:
+       *
+       * public-vpn-66.opengw.net
+       * vpn123456789.opengw.net
+       */
+      let hostName =
+        rawHostName;
+
+      if (
+        !hostName.includes(".")
+      ) {
+        hostName =
+          `${hostName}.opengw.net`;
+      }
+
+      // -------------------------------------------------------------
+      // بررسی hostname
+      // -------------------------------------------------------------
+
+      if (
+        !/^[a-zA-Z0-9.-]+$/.test(
+          hostName
+        )
+      ) {
+        console.log(
+          `⚠️ hostname نامعتبر VPNGate: ${hostName}`
+        );
+
+        continue;
+      }
+
+      // -------------------------------------------------------------
+      // دریافت OpenVPN config
+      // -------------------------------------------------------------
+
       const ovpnBase64 =
         cols
           .slice(14)
           .join(",")
           .trim();
 
-      let port = 443;
+      let ovpnConfig = "";
 
       if (ovpnBase64) {
         try {
-          const ovpnConfig =
+          ovpnConfig =
             Buffer
               .from(
                 ovpnBase64,
                 "base64"
               )
               .toString("utf8");
-
-          const match =
-            ovpnConfig.match(
-              /^remote\s+\S+\s+(\d+)/m
-            );
-
-          if (match) {
-            port =
-              Number(match[1]);
-          }
         } catch {
-          port = 443;
+          ovpnConfig = "";
         }
       }
+
+      // -------------------------------------------------------------
+      // پیدا کردن پورت TCP
+      // -------------------------------------------------------------
+
+      let port = null;
+
+      /*
+       * نمونه‌های OpenVPN:
+       *
+       * remote public-vpn-158.opengw.net 443
+       *
+       * یا:
+       *
+       * remote vpn123456789.opengw.net 1556
+       *
+       * ما فقط remoteهایی را می‌خواهیم که پروتکل TCP دارند.
+       */
+
+      const remoteLines =
+        ovpnConfig.match(
+          /^remote\s+\S+\s+\d+(?:\s+\S+)?/gm
+        ) || [];
+
+      for (
+        const remoteLine
+        of remoteLines
+      ) {
+        const parts =
+          remoteLine
+            .trim()
+            .split(/\s+/);
+
+        if (
+          parts.length < 3
+        ) {
+          continue;
+        }
+
+        const candidatePort =
+          Number(parts[2]);
+
+        if (
+          !Number.isInteger(
+            candidatePort
+          ) ||
+          candidatePort < 1 ||
+          candidatePort > 65535
+        ) {
+          continue;
+        }
+
+        /*
+         * اگر remote به شکل زیر باشد:
+         *
+         * remote host 443 tcp
+         *
+         * این بهترین حالت است.
+         */
+        if (
+          parts[3] &&
+          parts[3].toLowerCase() === "tcp"
+        ) {
+          port =
+            candidatePort;
+
+          break;
+        }
+
+        /*
+         * اگر پروتکل مشخص نشده بود،
+         * فعلاً پورت را به‌عنوان TCP candidate
+         * در نظر می‌گیریم.
+         *
+         * چون SSTP خودش TCP است.
+         */
+        if (
+          port === null
+        ) {
+          port =
+            candidatePort;
+        }
+      }
+
+      // -------------------------------------------------------------
+      // اگر پورت از config پیدا نشد
+      // -------------------------------------------------------------
+
+      if (
+        port === null
+      ) {
+        /*
+         * بسیاری از سرورهای public-vpn
+         * از 443 برای SSTP استفاده می‌کنند.
+         *
+         * اما به جای اینکه کورکورانه همه را 443 فرض کنیم،
+         * فقط وقتی hostname از نوع public-vpn باشد
+         * fallback می‌کنیم.
+         */
+        if (
+          hostName.startsWith(
+            "public-vpn-"
+          )
+        ) {
+          port = 443;
+        } else {
+          /*
+           * برای سایر سرورها بدون پورت واقعی
+           * تست SSTP انجام نمی‌دهیم.
+           */
+          continue;
+        }
+      }
+
+      // -------------------------------------------------------------
+      // اعتبارسنجی پورت
+      // -------------------------------------------------------------
 
       if (
         !Number.isInteger(port) ||
@@ -897,13 +1048,21 @@ async function fetchVpnGateServers() {
         continue;
       }
 
+      // -------------------------------------------------------------
+      // ساخت server object
+      // -------------------------------------------------------------
+
       servers.push({
-        uri: address,
+        /*
+         * مهم:
+         * uri باید hostname کامل باشد.
+         */
+        uri:
+          hostName,
 
         name:
           countryLong ||
-          hostName ||
-          ip,
+          hostName,
 
         port,
 
@@ -911,15 +1070,67 @@ async function fetchVpnGateServers() {
 
         hostName,
 
+        /*
+         * برای debug
+         */
+        rawHostName,
+
         ping: -1,
       });
-    } catch {
-      // خط بدشکل
+
+    } catch (e) {
+      console.log(
+        `⚠️ خطا در پردازش یک خط VPNGate: ${e.message}`
+      );
     }
   }
 
-  return servers;
+  // -------------------------------------------------------------
+  // حذف duplicate
+  // -------------------------------------------------------------
+
+  const unique = [];
+  const seen = new Set();
+
+  for (
+    const server
+    of servers
+  ) {
+    const key =
+      `${server.hostName}:${server.port}`;
+
+    if (
+      seen.has(key)
+    ) {
+      continue;
+    }
+
+    seen.add(key);
+
+    unique.push(
+      server
+    );
+  }
+
+  console.log(
+    `VPNGate parser: ${unique.length} سرور SSTP معتبر استخراج شد.`
+  );
+
+  /*
+   * چند نمونه برای اطمینان از درست بودن parser
+   */
+  for (
+    const server
+    of unique.slice(0, 5)
+  ) {
+    console.log(
+      `   [VPNGate] ${server.hostName}:${server.port} (${server.ip})`
+    );
+  }
+
+  return unique;
 }
+```
 
 // ---------------------------------------------------------------------
 // تست واقعی SSTP
