@@ -1,3 +1,15 @@
+```javascript
+/**
+ * تست واقعی لیست سرورها
+ *
+ * V2Ray/Xray:
+ *   GitHub configs -> Xray -> SOCKS -> curl -> HTTP 204
+ *
+ * SSTP:
+ *   VPNGate -> sstpc -> PPP -> curl روی PPP -> HTTP 204
+ *
+ * سپس فقط سرورهای سالم به Cloudflare Worker ارسال می‌شوند.
+ */
 
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -7,6 +19,10 @@ import path from "node:path";
 import tls from "node:tls";
 
 const execFileP = promisify(execFile);
+
+// =====================================================================
+// ENV
+// =====================================================================
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -2259,5 +2275,344 @@ async function main() {
     await fetchVpnGateServers()
       .catch(e => {
         console.error(
-          `⚠️ خطا در VPNGate:
+          `⚠️ خطا در VPNGate: ${e.message}`
+        );
+
+        return [];
+      });
+
+  console.log(
+    `VPNGate: ${vpnGateServers.length} سرور دریافت شد.`
+  );
+
+  // -------------------------------------------------------------------
+  // Split
+  // -------------------------------------------------------------------
+
+  const currentV2ray =
+    currentServers.filter(
+      s =>
+        s.port === "v2ray"
+    );
+
+  const currentSstp =
+    currentServers.filter(
+      s =>
+        s.port !== "v2ray"
+    );
+
+  // -------------------------------------------------------------------
+  // V2Ray candidates
+  // -------------------------------------------------------------------
+
+  const v2rayMap =
+    new Map();
+
+  for (
+    const s
+    of [
+      ...ghServers,
+      ...currentV2ray,
+    ]
+  ) {
+    const key =
+      dedupKey(
+        s.uri
+      );
+
+    if (
+      !v2rayMap.has(key)
+    ) {
+      v2rayMap.set(
+        key,
+        s
+      );
+    }
+  }
+
+  const v2rayCandidates =
+    Array.from(
+      v2rayMap.values()
+    ).slice(
+      0,
+      MAX_CANDIDATES
+    );
+
+  // -------------------------------------------------------------------
+  // SSTP candidates
+  // -------------------------------------------------------------------
+
+  const sstpMap =
+    new Map();
+
+  for (
+    const s
+    of [
+      ...vpnGateServers,
+      ...currentSstp,
+    ]
+  ) {
+    const host =
+      s.hostName ||
+      s.uri;
+
+    const key =
+      `${host}:${s.port}`;
+
+    if (
+      !sstpMap.has(key)
+    ) {
+      sstpMap.set(
+        key,
+        s
+      );
+    }
+  }
+
+  const sstpCandidates =
+    Array.from(
+      sstpMap.values()
+    ).slice(
+      0,
+      MAX_SSTP_CANDIDATES
+    );
+
+  console.log(
+    `📊 آماده‌سازی تست: ` +
+    `${v2rayCandidates.length} سرور V2Ray و ` +
+    `${sstpCandidates.length} سرور SSTP`
+  );
+
+  // -------------------------------------------------------------------
+  // V2Ray test
+  // -------------------------------------------------------------------
+
+  console.log(
+    "\n🧪 شروع تست سرورهای V2Ray..."
+  );
+
+  const {
+    healthy:
+      healthyV2ray,
+
+    tested:
+      testedV2rayKeys,
+  } =
+    await testAll(
+      v2rayCandidates,
+      CONCURRENCY
+    );
+
+  // -------------------------------------------------------------------
+  // SSTP test
+  // -------------------------------------------------------------------
+
+  console.log(
+    "\n🧪 شروع تست سرورهای SSTP..."
+  );
+
+  const {
+    healthy:
+      healthySstp,
+
+    tested:
+      testedSstpKeys,
+  } =
+    await testAllSstp(
+      sstpCandidates,
+      SSTP_CONCURRENCY
+    );
+
+  // -------------------------------------------------------------------
+  // Merge healthy
+  // -------------------------------------------------------------------
+
+  const finalMap =
+    new Map();
+
+  for (
+    const s
+    of [
+      ...healthyV2ray,
+      ...healthySstp,
+    ]
+  ) {
+    const isV2ray =
+      s.port === "v2ray";
+
+    const key =
+      isV2ray
+        ? dedupKey(
+            s.uri
+          )
+        : `${
+            s.hostName ||
+            s.uri
+          }:${s.port}`;
+
+    finalMap.set(
+      key,
+      s
+    );
+  }
+
+  // -------------------------------------------------------------------
+  // Keep previous servers that were NOT tested
+  // -------------------------------------------------------------------
+
+  for (
+    const s
+    of currentServers
+  ) {
+    const isV2ray =
+      s.port === "v2ray";
+
+    const key =
+      isV2ray
+        ? dedupKey(
+            s.uri
+          )
+        : `${
+            s.hostName ||
+            s.uri
+          }:${s.port}`;
+
+    const wasTested =
+      isV2ray
+        ? testedV2rayKeys.has(
+            key
+          )
+        : testedSstpKeys.has(
+            key
+          );
+
+    if (
+      !wasTested &&
+      !finalMap.has(key)
+    ) {
+      finalMap.set(
+        key,
+        s
+      );
+    }
+  }
+
+  const finalHealthy =
+    Array.from(
+      finalMap.values()
+    );
+
+  finalHealthy.sort(
+    (a, b) => {
+      const ap =
+        Number(a.ping);
+
+      const bp =
+        Number(b.ping);
+
+      return (
+        (
+          Number.isFinite(ap)
+            ? ap
+            : 999999999
+        ) -
+        (
+          Number.isFinite(bp)
+            ? bp
+            : 999999999
+        )
+      );
+    }
+  );
+
+  console.log(
+    `\n🎉 مجموع سرورهای سالم نهایی: ${finalHealthy.length}`
+  );
+
+  console.log(
+    `   V2Ray سالم: ${healthyV2ray.length}`
+  );
+
+  console.log(
+    `   SSTP سالم: ${healthySstp.length}`
+  );
+
+  // -------------------------------------------------------------------
+  // Safety
+  // -------------------------------------------------------------------
+
+  if (
+    currentServers.length > 0
+  ) {
+    const minRequired =
+      Math.floor(
+        currentServers.length *
+        MIN_KEEP_RATIO
+      );
+
+    console.log(
+      `🛡️ حداقل تعداد مجاز: ${minRequired}`
+    );
+
+    if (
+      finalHealthy.length <
+      minRequired
+    ) {
+      console.error(
+        `❌ تعداد سرورهای سالم (${finalHealthy.length}) کمتر از حد مجاز (${minRequired}) است.`
+      );
+
+      console.error(
+        "❌ آپدیت Cloudflare لغو شد."
+      );
+
+      process.exit(1);
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Upload
+  // -------------------------------------------------------------------
+
+  console.log(
+    "\n☁️ در حال آپدیت Cloudflare..."
+  );
+
+  await uploadToCloudflare(
+    CF_UPDATE_URL,
+    finalHealthy
+  );
+
+  console.log(
+    "\n======================================"
+  );
+
+  console.log(
+    "✅ تست و بروزرسانی با موفقیت تمام شد."
+  );
+
+  console.log(
+    "======================================"
+  );
+}
+
+// =====================================================================
+// RUN
+// =====================================================================
+
+main().catch(
+  error => {
+    console.error(
+      "\n❌ خطای نهایی:"
+    );
+
+    console.error(
+      error?.stack ||
+      error?.message ||
+      error
+    );
+
+    process.exit(1);
+  }
+);
 ```
