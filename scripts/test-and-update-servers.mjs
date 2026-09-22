@@ -1,9 +1,9 @@
-const fs = require("fs").promises;
-const path = require("path");
-const os = require("os");
-const tls = require("tls");
-const { spawn, execFile } = require("child_process");
-const { promisify } = require("util");
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import tls from "node:tls";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
 
@@ -778,7 +778,6 @@ async function testSstpReal(server, timeoutMs = SSTP_TIMEOUT_MS) {
     if (settled) return null;
     settled = true;
 
-    // Kill SSTPC process group
     if (child?.pid) {
       try {
         process.kill(-child.pid, "SIGTERM");
@@ -799,7 +798,6 @@ async function testSstpReal(server, timeoutMs = SSTP_TIMEOUT_MS) {
       }
     }
 
-    // Cleanup PPP
     if (pppInterface) {
       try {
         await execFileP("sudo", ["-n", "ip", "link", "set", pppInterface, "down"], {
@@ -808,7 +806,6 @@ async function testSstpReal(server, timeoutMs = SSTP_TIMEOUT_MS) {
       } catch {}
     }
 
-    // Log
     if (ok) {
       console.log(
         `✅ [SSTP REAL] سالم (${Date.now() - started}ms): ${host}:${port} ${reason}`
@@ -877,7 +874,6 @@ async function testSstpReal(server, timeoutMs = SSTP_TIMEOUT_MS) {
 
     const deadline = Date.now() + timeoutMs;
 
-    // Wait for PPP
     while (Date.now() < deadline) {
       await sleep(500);
 
@@ -922,7 +918,6 @@ async function testSstpReal(server, timeoutMs = SSTP_TIMEOUT_MS) {
       return finish(false, "PPP interface ساخته نشد / timeout");
     }
 
-    // Internet test
     if (SSTP_INTERNET_TEST) {
       try {
         const { stdout } = await execFileP(
@@ -1075,7 +1070,6 @@ async function testAllSstp(servers, concurrency) {
 async function main() {
   console.log("🚀 شروع فرایند تست و بروزرسانی سرورها...");
 
-  // 1. دریافت و تست سرورهای Xray
   let xrayCandidates = [];
   try {
     console.log("در حال دریافت سرورهای Xray از Cloudflare و GitHub...");
@@ -1103,7 +1097,6 @@ async function main() {
   console.log(`تعداد ${xrayCandidates.length} کاندید Xray برای تست آماده شد.`);
   const xrayResults = await testAll(xrayCandidates, CONCURRENCY);
 
-  // 2. دریافت و تست سرورهای SSTP
   let sstpCandidates = [];
   try {
     const vpnGateServers = await fetchVpnGateServers();
@@ -1115,7 +1108,6 @@ async function main() {
   console.log(`تعداد ${sstpCandidates.length} کاندید SSTP برای تست آماده شد.`);
   const healthySstp = await testAllSstp(sstpCandidates, SSTP_CONCURRENCY);
 
-  // 3. ترکیب سرورهای سالم و آپلود
   const finalServers = [
     ...xrayResults.healthy,
     ...healthySstp.map(s => ({
