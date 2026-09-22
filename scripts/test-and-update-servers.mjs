@@ -1,28 +1,3 @@
-```javascript
-/**
- * تست واقعی لیست سرورها
- *
- * V2Ray/Xray:
- *   GitHub configs -> Xray -> SOCKS -> curl -> HTTP 204
- *
- * SSTP:
- *   VPNGate -> sstpc -> PPP -> curl روی PPP -> HTTP 204
- *
- * سپس فقط سرورهای سالم به Cloudflare Worker ارسال می‌شوند.
- */
-
-import { spawn, execFile } from "node:child_process";
-import { promisify } from "node:util";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import tls from "node:tls";
-
-const execFileP = promisify(execFile);
-
-// =====================================================================
-// ENV
-// =====================================================================
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -393,7 +368,7 @@ function parseLinkToOutbound(link) {
 
     default:
       throw new Error(
-        `پروتکل پشتیبانی نمی‌شود: ${scheme}`
+        ` ${scheme}`
       );
   }
 }
