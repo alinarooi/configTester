@@ -206,7 +206,7 @@ jobs:
           # --------------------------------------
           # V2Ray testing
           # --------------------------------------
-          MAX_CANDIDATES: "2000"
+          MAX_CANDIDATES: "200"
           CONCURRENCY: "60"
           MIN_KEEP_RATIO: "0.5"
 
