@@ -1116,39 +1116,31 @@ async function main() {
 
   let cloudflareServers = [];
   let githubServers = [];
+  let vpnGateServers = [];
 
   // ===================================================================
-  // دریافت Cloudflare و GitHub
-  // ===================================================================
-
-  const [cfResult, ghResult] = await Promise.allSettled([
-    fetchCloudflareServers(CF_ALL_URL),
-    fetchGithubConfigs(GH_RAW_URL),
-  ]);
-
-  if (cfResult.status === "fulfilled") {
-    cloudflareServers = cfResult.value;
-  } else {
-    console.error(
-      "خطا در دریافت سرورهای Cloudflare:",
-      cfResult.reason?.message || cfResult.reason
-    );
-  }
-
-  if (ghResult.status === "fulfilled") {
-    githubServers = ghResult.value;
-  } else {
-    console.error(
-      "خطا در دریافت سرورهای GitHub:",
-      ghResult.reason?.message || ghResult.reason
-    );
-  }
-
-  // ===================================================================
-  // تفکیک Cloudflare بر اساس port
+  // مرحله 1: دریافت Cloudflare
   //
-  // port = v2ray  -> تست با Xray Core
-  // port = عدد     -> تست با SSTP
+  // نکته مهم:
+  // تمام سرورهای فعلی Cloudflare ابتدا تست می‌شوند.
+  // هیچ MAX_CANDIDATES روی Cloudflare اعمال نمی‌شود.
+  // ===================================================================
+
+  try {
+    cloudflareServers = await fetchCloudflareServers(CF_ALL_URL);
+
+    console.log(
+      `☁️ تعداد کل سرورهای فعلی Cloudflare: ${cloudflareServers.length}`
+    );
+  } catch (e) {
+    console.error(
+      "❌ خطا در دریافت سرورهای Cloudflare:",
+      e.message || e
+    );
+  }
+
+  // ===================================================================
+  // مرحله 1-A: تفکیک Cloudflare به Xray و SSTP
   // ===================================================================
 
   const cloudflareXray = cloudflareServers.filter(
@@ -1170,91 +1162,41 @@ async function main() {
   console.log(
     `☁️ Cloudflare: ${cloudflareXray.length} سرور Xray و ${cloudflareSstp.length} سرور SSTP`
   );
-  console.log(`🐙 GitHub: ${githubServers.length} کانفیگ Xray`);
 
   // ===================================================================
-  // Xray candidates
-  // فقط Cloudflare با port=v2ray + GitHub
+  // مرحله 1-B: تست تمام سرورهای Xray موجود در Cloudflare
   // ===================================================================
-
-  let xrayCandidates = [...cloudflareXray, ...githubServers];
-
-  const seenXray = new Set();
-
-  xrayCandidates = xrayCandidates
-    .filter(server => {
-      const key = dedupKey(server.uri);
-
-      if (!key || seenXray.has(key)) {
-        return false;
-      }
-
-      seenXray.add(key);
-      return true;
-    })
-    .slice(0, MAX_CANDIDATES);
 
   console.log(
-    `🧪 تعداد ${xrayCandidates.length} کاندید Xray برای تست آماده شد.`
+    `🧪 در حال تست تمام ${cloudflareXray.length} سرور Xray موجود در Cloudflare...`
   );
 
-  const xrayResults = await testAll(xrayCandidates, CONCURRENCY);
+  const cloudflareXrayResults = await testAll(
+    cloudflareXray,
+    CONCURRENCY
+  );
 
   // ===================================================================
-  // SSTP candidates
-  // Cloudflare با پورت عددی + VPNGate
+  // مرحله 1-C: تست تمام سرورهای SSTP موجود در Cloudflare
   // ===================================================================
-
-  let sstpCandidates = [...cloudflareSstp];
-
-  try {
-    const vpnGateServers = await fetchVpnGateServers();
-    sstpCandidates.push(...vpnGateServers);
-  } catch (e) {
-    console.error("خطا در دریافت سرورهای VPNGate:", e.message);
-  }
-
-  // حذف تکراری‌ها با host:port
-  const seenSstp = new Set();
-
-  sstpCandidates = sstpCandidates
-    .filter(server => {
-      const host = String(server.hostName || server.uri || "")
-        .trim()
-        .toLowerCase();
-      const port = String(server.port || "").trim();
-
-      if (!host || !port) return false;
-
-      const key = `${host}:${port}`;
-
-      if (seenSstp.has(key)) {
-        return false;
-      }
-
-      seenSstp.add(key);
-      return true;
-    })
-    .slice(0, MAX_SSTP_CANDIDATES);
 
   console.log(
-    `🧪 تعداد ${sstpCandidates.length} کاندید SSTP برای تست آماده شد.`
+    `🧪 در حال تست تمام ${cloudflareSstp.length} سرور SSTP موجود در Cloudflare...`
   );
 
-  const healthySstp = await testAllSstp(
-    sstpCandidates,
+  const cloudflareSstpHealthy = await testAllSstp(
+    cloudflareSstp,
     SSTP_CONCURRENCY
   );
 
   // ===================================================================
-  // ساخت لیست نهایی
+  // مرحله 1-D: ساخت لیست سالم Cloudflare
   //
-  // Xray  -> port = v2ray
-  // SSTP  -> port = عدد واقعی
+  // سرورهای خراب Cloudflare اینجا حذف می‌شوند.
   // ===================================================================
 
-  const finalServers = [
-    ...xrayResults.healthy.map(server => ({
+  const healthyCloudflare = [
+    ...cloudflareXrayResults.healthy.map(server => ({
       address: server.uri,
       name: server.name,
       port: "v2ray",
@@ -1262,7 +1204,7 @@ async function main() {
       icon: server.icon || "",
     })),
 
-    ...healthySstp.map(server => ({
+    ...cloudflareSstpHealthy.map(server => ({
       address: server.hostName || server.uri,
       name: server.name,
       port: String(server.port),
@@ -1271,21 +1213,282 @@ async function main() {
     })),
   ];
 
+  console.log(
+    `☁️ سرورهای سالم Cloudflare: ${healthyCloudflare.length} از ${cloudflareServers.length}`
+  );
+
+  // ===================================================================
+  // مرحله 2: دریافت GitHub
+  //
+  // GitHub فقط بعد از اتمام تست Cloudflare بررسی می‌شود.
+  // ===================================================================
+
+  try {
+    githubServers = await fetchGithubConfigs(GH_RAW_URL);
+
+    console.log(
+      `🐙 GitHub: ${githubServers.length} کانفیگ دریافت شد.`
+    );
+  } catch (e) {
+    console.error(
+      "❌ خطا در دریافت سرورهای GitHub:",
+      e.message || e
+    );
+  }
+
+  // ===================================================================
+  // مرحله 2-A: آماده‌سازی و تست GitHub
+  //
+  // GitHub فقط منبع تأمین سرورهای سالم جدید است.
+  // سرورهایی که از قبل در Cloudflare هستند دوباره اضافه نمی‌شوند.
+  // ===================================================================
+
+  const healthyCloudflareXrayKeys = new Set(
+    healthyCloudflare
+      .filter(server => server.port === "v2ray")
+      .map(server => dedupKey(server.address))
+  );
+
+  let githubCandidates = [];
+  const seenGithub = new Set();
+
+  githubCandidates = githubServers
+    .filter(server => {
+      const key = dedupKey(server.uri);
+
+      if (!key || seenGithub.has(key)) {
+        return false;
+      }
+
+      // اگر همین کانفیگ قبلاً در Cloudflare بوده،
+      // نیازی نیست به لیست جدید اضافه شود.
+      if (healthyCloudflareXrayKeys.has(key)) {
+        return false;
+      }
+
+      seenGithub.add(key);
+      return true;
+    })
+    .slice(0, MAX_CANDIDATES);
+
+  console.log(
+    `🧪 تعداد ${githubCandidates.length} کاندید GitHub برای تست آماده شد.`
+  );
+
+  const githubResults = await testAll(
+    githubCandidates,
+    CONCURRENCY
+  );
+
+  const healthyGithub = githubResults.healthy.map(server => ({
+    address: server.uri,
+    name: server.name,
+    port: "v2ray",
+    ping: server.ping,
+    icon: server.icon || "",
+  }));
+
+  // ===================================================================
+  // مرحله 2-B: دریافت VPNGate
+  //
+  // VPNGate هم بعد از Cloudflare بررسی می‌شود.
+  // ===================================================================
+
+  try {
+    vpnGateServers = await fetchVpnGateServers();
+
+    console.log(
+      `🌐 VPNGate: ${vpnGateServers.length} سرور SSTP دریافت شد.`
+    );
+  } catch (e) {
+    console.error(
+      "❌ خطا در دریافت سرورهای VPNGate:",
+      e.message || e
+    );
+  }
+
+  // ===================================================================
+  // مرحله 2-C: آماده‌سازی و تست VPNGate
+  // ===================================================================
+
+  const healthyCloudflareSstpKeys = new Set(
+    healthyCloudflare
+      .filter(server => server.port !== "v2ray")
+      .map(server => {
+        const host = String(server.address || "")
+          .trim()
+          .toLowerCase();
+
+        const port = String(server.port || "").trim();
+
+        return `${host}:${port}`;
+      })
+  );
+
+  const seenVpnGate = new Set();
+
+  const vpnGateCandidates = vpnGateServers
+    .filter(server => {
+      const host = String(server.hostName || server.uri || "")
+        .trim()
+        .toLowerCase();
+
+      const port = String(server.port || "").trim();
+
+      if (!host || !port) return false;
+
+      const key = `${host}:${port}`;
+
+      if (seenVpnGate.has(key)) {
+        return false;
+      }
+
+      // اگر سرور از قبل در Cloudflare بوده، دوباره اضافه نشود.
+      if (healthyCloudflareSstpKeys.has(key)) {
+        return false;
+      }
+
+      seenVpnGate.add(key);
+      return true;
+    })
+    .slice(0, MAX_SSTP_CANDIDATES);
+
+  console.log(
+    `🧪 تعداد ${vpnGateCandidates.length} کاندید VPNGate برای تست آماده شد.`
+  );
+
+  const healthyVpnGate = await testAllSstp(
+    vpnGateCandidates,
+    SSTP_CONCURRENCY
+  );
+
+  const healthyVpnGateServers = healthyVpnGate.map(server => ({
+    address: server.hostName || server.uri,
+    name: server.name,
+    port: String(server.port),
+    ping: server.ping,
+    icon: server.icon || "",
+  }));
+
+  // ===================================================================
+  // مرحله 3: ترکیب نهایی
+  //
+  // ترتیب:
+  // 1. سرورهای سالم باقی‌مانده از Cloudflare
+  // 2. سرورهای سالم جدید GitHub
+  // 3. سرورهای سالم جدید VPNGate
+  //
+  // در این مرحله دوباره Deduplicate انجام می‌شود تا هیچ سرور
+  // تکراری وارد Cloudflare نشود.
+  // ===================================================================
+
+  const finalServers = [];
+  const finalXrayKeys = new Set();
+  const finalSstpKeys = new Set();
+
+  // ---------------------------------------------------------------
+  // اضافه کردن Cloudflare سالم
+  // ---------------------------------------------------------------
+
+  for (const server of healthyCloudflare) {
+    if (server.port === "v2ray") {
+      const key = dedupKey(server.address);
+
+      if (!key || finalXrayKeys.has(key)) {
+        continue;
+      }
+
+      finalXrayKeys.add(key);
+      finalServers.push(server);
+      continue;
+    }
+
+    const host = String(server.address || "")
+      .trim()
+      .toLowerCase();
+
+    const port = String(server.port || "").trim();
+    const key = `${host}:${port}`;
+
+    if (!host || !port || finalSstpKeys.has(key)) {
+      continue;
+    }
+
+    finalSstpKeys.add(key);
+    finalServers.push(server);
+  }
+
+  // ---------------------------------------------------------------
+  // اضافه کردن GitHub سالم
+  // ---------------------------------------------------------------
+
+  for (const server of healthyGithub) {
+    const key = dedupKey(server.address);
+
+    if (!key || finalXrayKeys.has(key)) {
+      continue;
+    }
+
+    finalXrayKeys.add(key);
+    finalServers.push(server);
+  }
+
+  // ---------------------------------------------------------------
+  // اضافه کردن VPNGate سالم
+  // ---------------------------------------------------------------
+
+  for (const server of healthyVpnGateServers) {
+    const host = String(server.address || "")
+      .trim()
+      .toLowerCase();
+
+    const port = String(server.port || "").trim();
+    const key = `${host}:${port}`;
+
+    if (!host || !port || finalSstpKeys.has(key)) {
+      continue;
+    }
+
+    finalSstpKeys.add(key);
+    finalServers.push(server);
+  }
+
+  // ===================================================================
+  // گزارش نهایی
+  // ===================================================================
+
   console.log(`========================================`);
-  console.log(`✅ Xray سالم: ${xrayResults.healthy.length}`);
-  console.log(`✅ SSTP سالم: ${healthySstp.length}`);
-  console.log(`✅ تعداد کل سرورهای سالم: ${finalServers.length}`);
+  console.log(`☁️ Cloudflare اولیه: ${cloudflareServers.length}`);
+  console.log(`☁️ Cloudflare سالم: ${healthyCloudflare.length}`);
+  console.log(`🐙 GitHub سالم جدید: ${healthyGithub.length}`);
+  console.log(`🌐 VPNGate سالم جدید: ${healthyVpnGateServers.length}`);
+  console.log(`========================================`);
+  console.log(`🧪 Xray سالم Cloudflare: ${cloudflareXrayResults.healthy.length}`);
+  console.log(`🧪 SSTP سالم Cloudflare: ${cloudflareSstpHealthy.length}`);
+  console.log(`🧪 Xray سالم GitHub: ${githubResults.healthy.length}`);
+  console.log(`🧪 SSTP سالم VPNGate: ${healthyVpnGate.length}`);
+  console.log(`========================================`);
+  console.log(`✅ تعداد نهایی سرورها: ${finalServers.length}`);
   console.log(`========================================`);
 
+  // ===================================================================
+  // مرحله 4: ارسال لیست نهایی به Cloudflare
+  // ===================================================================
+
   if (finalServers.length > 0) {
-    await uploadToCloudflare(CF_UPDATE_URL, finalServers);
+    await uploadToCloudflare(
+      CF_UPDATE_URL,
+      finalServers
+    );
   } else {
     console.log(
       "⚠️ هیچ سرور سالمی یافت نشد. آپدیت Cloudflare انجام نشد."
     );
   }
 }
+
 main().catch(err => {
   console.error("❌ خطای اجرا:", err);
   process.exit(1);
 });
+
