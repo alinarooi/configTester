@@ -47,8 +47,7 @@ const SSTP_USERNAME = process.env.SSTP_USERNAME || "vpn";
 const SSTP_PASSWORD = process.env.SSTP_PASSWORD || "vpn";
 const SSTP_REAL_TUNNEL = process.env.SSTP_REAL_TUNNEL === "1";
 const SSTP_INTERNET_TEST = process.env.SSTP_INTERNET_TEST !== "0";
-const SSTP_TEST_URL =
-  process.env.SSTP_TEST_URL || "https://www.gstatic.com/generate_204";
+const SSTP_TEST_URL = process.env.SSTP_TEST_URL || "https://www.gstatic.com/generate_204";
 
 // =====================================================================
 // Helpers
@@ -82,17 +81,27 @@ async function fetchCloudflareServers(url) {
   }
 
   return arr
-    .map((o, i) => ({
-      id: String(o.id ?? i),
-      uri: String(o.address || "").trim(),
-      name: String(o.country || `کلودفلر-${i + 1}`),
-      port: o.port === "v2ray" ? "v2ray" : Number(o.port) || 0,
-      ping: Number.isFinite(Number(o.ping)) ? Number(o.ping) : -1,
-      ip: String(o.ip || "").trim(),
-      hostName: String(o.hostName || o.address || "").trim(),
-      icon: String(o.icon || "").trim(),
-    }))
-    .filter(s => s.uri.length > 0);
+    .map((o, i) => {
+      const rawPort = String(o.port ?? "").trim();
+      const numericPort = Number(rawPort);
+
+      return {
+        id: String(o.id ?? i),
+        uri: String(o.address || "").trim(),
+        name: String(o.country || `کلودفلر-${i + 1}`),
+        port:
+          rawPort.toLowerCase() === "v2ray"
+            ? "v2ray"
+            : Number.isInteger(numericPort) && numericPort >= 1 && numericPort <= 65535
+              ? String(numericPort)
+              : "",
+        ping: Number.isFinite(Number(o.ping)) ? Number(o.ping) : -1,
+        ip: String(o.ip || "").trim(),
+        hostName: String(o.hostName || o.address || "").trim(),
+        icon: String(o.icon || "").trim(),
+      };
+    })
+    .filter(s => s.uri.length > 0 && s.port.length > 0);
 }
 
 // =====================================================================
@@ -107,24 +116,40 @@ async function uploadToCloudflare(url, servers) {
   const body = servers
     .map((s, index) => {
       const address = String(s.address || s.uri || "").trim();
+      const country = String(s.country || s.name || "Unknown").trim();
+      const rawPort = String(s.port ?? "").trim();
+      const isV2Ray = rawPort.toLowerCase() === "v2ray";
+      const numericPort = Number(rawPort);
 
-      const isV2Ray =
-        s.port === "v2ray" ||
-        /^(vless|vmess|trojan|ss|hysteria2|hy2):\/\//i.test(address);
+      if (!address) return null;
+
+      if (isV2Ray) {
+        return {
+          id: String(index),
+          address,
+          country,
+          port: "v2ray",
+          icon: String(s.icon || "").trim(),
+        };
+      }
+
+      if (
+        !Number.isInteger(numericPort) ||
+        numericPort < 1 ||
+        numericPort > 65535
+      ) {
+        return null;
+      }
 
       return {
         id: String(index),
         address,
-        port: isV2Ray ? "v2ray" : String(Number(s.port)),
-        country: String(s.country || s.name || "Unknown").trim(),
+        country,
+        port: String(numericPort),
         icon: String(s.icon || "").trim(),
       };
     })
-    .filter(
-      s =>
-        s.address &&
-        (s.port === "v2ray" || /^\d+$/.test(s.port))
-    );
+    .filter(Boolean);
 
   const res = await fetch(url, {
     method: "POST",
@@ -145,16 +170,8 @@ async function uploadToCloudflare(url, servers) {
 
   console.log(`☁️ Cloudflare با موفقیت آپدیت شد: ${body.length} سرور`);
 
-  console.log("نمونه خروجی نهایی:");
-
-  console.log(
-    JSON.stringify(body.slice(0, 3), null, 2)
-  );
-
   if (responseText) {
-    console.log(
-      `Cloudflare response: ${responseText.slice(0, 500)}`
-    );
+    console.log(`Cloudflare response: ${responseText.slice(0, 500)}`);
   }
 }
 
@@ -190,9 +207,7 @@ async function fetchGithubConfigs(url) {
   return text
     .split("\n")
     .map(line => line.trim())
-    .filter(line =>
-      schemes.some(scheme => line.startsWith(scheme))
-    )
+    .filter(line => schemes.some(scheme => line.startsWith(scheme)))
     .map((uri, i) => ({
       uri,
       name: `گیت‌هاب-${i + 1}`,
@@ -220,20 +235,15 @@ function parseLinkToOutbound(link) {
   switch (scheme) {
     case "vless":
       return buildVless(link);
-
     case "vmess":
       return buildVmess(link);
-
     case "trojan":
       return buildTrojan(link);
-
     case "ss":
       return buildShadowsocks(link);
-
     case "hysteria2":
     case "hy2":
       return buildHysteria(link);
-
     default:
       throw new Error(`پروتکل ناشناخته: ${scheme}`);
   }
@@ -323,24 +333,19 @@ function buildStreamSettings({
 
 function buildVless(link) {
   const u = new URL(link);
-
   const uuid = decodeURIComponent(u.username);
   const host = u.hostname;
   const port = Number(u.port) || 443;
-
-  const q = (key, def = "") =>
-    u.searchParams.get(key) || def;
+  const q = (key, def = "") => u.searchParams.get(key) || def;
 
   return {
     tag: "proxy",
     protocol: "vless",
-
     settings: {
       vnext: [
         {
           address: host,
           port,
-
           users: [
             {
               id: uuid,
@@ -350,7 +355,6 @@ function buildVless(link) {
         },
       ],
     },
-
     streamSettings: buildStreamSettings({
       security: q("security", "none"),
       network: q("type", "tcp"),
@@ -373,26 +377,19 @@ function buildVless(link) {
 // =====================================================================
 
 function buildVmess(link) {
-  const decoded = Buffer.from(
-    link.replace("vmess://", ""),
-    "base64"
-  ).toString("utf8");
-
+  const decoded = Buffer.from(link.replace("vmess://", ""), "base64").toString("utf8");
   const j = JSON.parse(decoded);
-
   const host = j.add;
   const port = Number(j.port) || 443;
 
   return {
     tag: "proxy",
     protocol: "vmess",
-
     settings: {
       vnext: [
         {
           address: host,
           port,
-
           users: [
             {
               id: j.id,
@@ -403,7 +400,6 @@ function buildVmess(link) {
         },
       ],
     },
-
     streamSettings: buildStreamSettings({
       security: j.tls === "tls" ? "tls" : "none",
       network: j.net || "tcp",
@@ -424,18 +420,14 @@ function buildVmess(link) {
 
 function buildTrojan(link) {
   const u = new URL(link);
-
   const password = decodeURIComponent(u.username);
   const host = u.hostname;
   const port = Number(u.port) || 443;
-
-  const q = (key, def = "") =>
-    u.searchParams.get(key) || def;
+  const q = (key, def = "") => u.searchParams.get(key) || def;
 
   return {
     tag: "proxy",
     protocol: "trojan",
-
     settings: {
       servers: [
         {
@@ -445,7 +437,6 @@ function buildTrojan(link) {
         },
       ],
     },
-
     streamSettings: buildStreamSettings({
       security: q("security", "tls"),
       network: q("type", "tcp"),
@@ -465,56 +456,29 @@ function buildTrojan(link) {
 // =====================================================================
 
 function buildShadowsocks(link) {
-  const raw = link
-    .replace("ss://", "")
-    .split("#")[0];
-
-  let method;
-  let password;
-  let host;
-  let port;
+  const raw = link.replace("ss://", "").split("#")[0];
+  let method, password, host, port;
 
   if (raw.includes("@")) {
     const [userInfo, hostPart] = raw.split("@");
-
     let decoded;
 
     try {
-      decoded = Buffer.from(
-        userInfo,
-        "base64url"
-      ).toString("utf8");
+      decoded = Buffer.from(userInfo, "base64url").toString("utf8");
     } catch {
-      decoded = Buffer.from(
-        userInfo,
-        "base64"
-      ).toString("utf8");
+      decoded = Buffer.from(userInfo, "base64").toString("utf8");
     }
 
     [method, password] = decoded.split(":");
-
-    const hostPort = hostPart
-      .split("/")[0]
-      .split("?")[0];
-
+    const hostPort = hostPart.split("/")[0].split("?")[0];
     const idx = hostPort.lastIndexOf(":");
-
     host = hostPort.slice(0, idx);
     port = Number(hostPort.slice(idx + 1));
   } else {
-    const decoded = Buffer.from(
-      raw,
-      "base64"
-    ).toString("utf8");
-
-    const [methodPass, hostPort] =
-      decoded.split("@");
-
-    [method, password] =
-      methodPass.split(":");
-
+    const decoded = Buffer.from(raw, "base64").toString("utf8");
+    const [methodPass, hostPort] = decoded.split("@");
+    [method, password] = methodPass.split(":");
     const idx = hostPort.lastIndexOf(":");
-
     host = hostPort.slice(0, idx);
     port = Number(hostPort.slice(idx + 1));
   }
@@ -522,7 +486,6 @@ function buildShadowsocks(link) {
   return {
     tag: "proxy",
     protocol: "shadowsocks",
-
     settings: {
       servers: [
         {
@@ -542,37 +505,26 @@ function buildShadowsocks(link) {
 
 function buildHysteria(link) {
   const u = new URL(link);
-
-  const auth = u.username
-    ? decodeURIComponent(u.username)
-    : "";
-
+  const auth = u.username ? decodeURIComponent(u.username) : "";
   const host = u.hostname;
   const port = Number(u.port) || 443;
-
-  const q = (key, def = "") =>
-    u.searchParams.get(key) || def;
+  const q = (key, def = "") => u.searchParams.get(key) || def;
 
   return {
     tag: "proxy",
     protocol: "hysteria",
-
     settings: {
       version: 2,
       address: host,
       port,
     },
-
     streamSettings: {
       network: "hysteria",
       security: "tls",
-
       tlsSettings: {
         serverName: q("sni", host),
-        allowInsecure:
-          q("insecure", "0") === "1",
+        allowInsecure: q("insecure", "0") === "1",
       },
-
       hysteriaSettings: {
         version: 2,
         auth,
@@ -590,23 +542,19 @@ function buildFullConfig(outbound, socksPort) {
     log: {
       loglevel: "warning",
     },
-
     inbounds: [
       {
         listen: "127.0.0.1",
         port: socksPort,
         protocol: "socks",
-
         settings: {
           auth: "noauth",
           udp: false,
         },
       },
     ],
-
     outbounds: [
       outbound,
-
       {
         tag: "direct",
         protocol: "freedom",
@@ -628,53 +576,35 @@ async function testOne(server, port) {
     return null;
   }
 
-  const configPath = path.join(
-    os.tmpdir(),
-    `xray-test-${port}.json`
-  );
+  const configPath = path.join(os.tmpdir(), `xray-test-${port}.json`);
 
-  await fs.writeFile(
-    configPath,
-    JSON.stringify(
-      buildFullConfig(outbound, port)
-    )
-  );
+  await fs.writeFile(configPath, JSON.stringify(buildFullConfig(outbound, port)));
 
-  const child = spawn(
-    XRAY_BIN,
-    ["run", "-c", configPath],
-    {
-      stdio: "ignore",
-    }
-  );
+  const child = spawn(XRAY_BIN, ["run", "-c", configPath], {
+    stdio: "ignore",
+  });
 
   try {
     await sleep(CORE_WARMUP_MS);
 
     const start = Date.now();
-
-    const { stdout } =
-      await execFileP("curl", [
-        "--socks5",
-        `127.0.0.1:${port}`,
-        "-m",
-        String(TEST_TIMEOUT_S),
-        "-s",
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{http_code}",
-        TEST_URL,
-      ]);
+    const { stdout } = await execFileP("curl", [
+      "--socks5",
+      `127.0.0.1:${port}`,
+      "-m",
+      String(TEST_TIMEOUT_S),
+      "-s",
+      "-o",
+      "/dev/null",
+      "-w",
+      "%{http_code}",
+      TEST_URL,
+    ]);
 
     const elapsed = Date.now() - start;
     const code = stdout.trim();
 
-    if (
-      code === "204" ||
-      (code.startsWith("2") &&
-        code.length === 3)
-    ) {
+    if (code === "204" || (code.startsWith("2") && code.length === 3)) {
       return elapsed;
     }
 
@@ -686,9 +616,7 @@ async function testOne(server, port) {
       child.kill("SIGKILL");
     } catch {}
 
-    await fs.rm(configPath, {
-      force: true,
-    });
+    await fs.rm(configPath, { force: true });
   }
 }
 
@@ -696,10 +624,7 @@ async function testOne(server, port) {
 // Test all Xray
 // =====================================================================
 
-async function testAll(
-  servers,
-  concurrency
-) {
+async function testAll(servers, concurrency) {
   const healthy = [];
   const tested = new Set();
 
@@ -709,22 +634,13 @@ async function testAll(
   async function worker() {
     while (true) {
       const i = nextIndex++;
-
-      if (i >= servers.length) {
-        return;
-      }
+      if (i >= servers.length) return;
 
       const server = servers[i];
       const port = nextPort++;
 
-      const ping = await testOne(
-        server,
-        port
-      );
-
-      tested.add(
-        dedupKey(server.uri)
-      );
+      const ping = await testOne(server, port);
+      tested.add(dedupKey(server.uri));
 
       if (ping != null) {
         healthy.push({
@@ -732,13 +648,9 @@ async function testAll(
           ping,
         });
 
-        console.log(
-          `✅ سالم (${ping}ms): ${server.name}`
-        );
+        console.log(`✅ سالم (${ping}ms): ${server.name}`);
       } else {
-        console.log(
-          `❌ ناسالم: ${server.name}`
-        );
+        console.log(`❌ ناسالم: ${server.name}`);
       }
     }
   }
@@ -748,19 +660,14 @@ async function testAll(
       {
         length: Math.min(
           Math.max(concurrency, 1),
-          Math.max(
-            servers.length,
-            1
-          )
+          Math.max(servers.length, 1)
         ),
       },
       worker
     )
   );
 
-  healthy.sort(
-    (a, b) => a.ping - b.ping
-  );
+  healthy.sort((a, b) => a.ping - b.ping);
 
   return {
     healthy,
@@ -773,21 +680,11 @@ async function testAll(
 // =====================================================================
 
 function normalizeVpnGateHost(host) {
-  const h = String(host || "")
-    .trim()
-    .replace(/\.$/, "");
+  const h = String(host || "").trim().replace(/\.$/, "");
 
   if (!h) return "";
-
-  if (
-    /^\d{1,3}(\.\d{1,3}){3}$/.test(h)
-  ) {
-    return h;
-  }
-
-  if (h.includes(".")) {
-    return h;
-  }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return h;
+  if (h.includes(".")) return h;
 
   return `${h}.opengw.net`;
 }
@@ -797,31 +694,18 @@ function normalizeVpnGateHost(host) {
 // =====================================================================
 
 async function fetchVpnGateServers() {
-  console.log(
-    "در حال دریافت لیست VPNGate..."
-  );
+  console.log("در حال دریافت لیست VPNGate...");
 
-  const res = await fetch(
-    VPNGATE_API_URL,
-    {
-      signal:
-        AbortSignal.timeout(15000),
-    }
-  );
+  const res = await fetch(VPNGATE_API_URL, {
+    signal: AbortSignal.timeout(15000),
+  });
 
   if (!res.ok) {
-    throw new Error(
-      `VPNGate HTTP ${res.status}`
-    );
+    throw new Error(`VPNGate HTTP ${res.status}`);
   }
 
   const text = await res.text();
-
-  const lines = text
-    .replace(/\r/g, "")
-    .split("\n")
-    .slice(2, -2);
-
+  const lines = text.replace(/\r/g, "").split("\n").slice(2, -2);
   const servers = [];
 
   for (const line of lines) {
@@ -829,89 +713,39 @@ async function fetchVpnGateServers() {
 
     try {
       const cols = line.split(",");
-
-      const rawHostName =
-        String(cols[0] || "").trim();
-
-      const ip =
-        String(cols[1] || "").trim();
-
-      const countryLong =
-        String(
-          cols[5] || "Unknown"
-        ).trim();
+      const rawHostName = String(cols[0] || "").trim();
+      const ip = String(cols[1] || "").trim();
+      const countryLong = String(cols[5] || "Unknown").trim();
 
       if (!rawHostName) continue;
 
-      const hostName =
-        normalizeVpnGateHost(
-          rawHostName
-        );
+      const hostName = normalizeVpnGateHost(rawHostName);
+      if (!hostName || !/^[a-zA-Z0-9.-]+$/.test(hostName)) continue;
 
-      if (
-        !hostName ||
-        !/^[a-zA-Z0-9.-]+$/.test(
-          hostName
-        )
-      ) {
-        continue;
-      }
-
-      const ovpnBase64 =
-        cols
-          .slice(14)
-          .join(",")
-          .trim();
-
+      const ovpnBase64 = cols.slice(14).join(",").trim();
       let ovpnConfig = "";
 
       if (ovpnBase64) {
         try {
-          ovpnConfig =
-            Buffer.from(
-              ovpnBase64,
-              "base64"
-            ).toString("utf8");
+          ovpnConfig = Buffer.from(ovpnBase64, "base64").toString("utf8");
         } catch {
           ovpnConfig = "";
         }
       }
 
       let port = null;
-
-      const remoteLines =
-        ovpnConfig.match(
-          /^remote\s+\S+\s+\d+(?:\s+\S+)?/gm
-        ) || [];
+      const remoteLines = ovpnConfig.match(/^remote\s+\S+\s+\d+(?:\s+\S+)?/gm) || [];
 
       for (const remoteLine of remoteLines) {
-        const parts =
-          remoteLine
-            .trim()
-            .split(/\s+/);
+        const parts = remoteLine.trim().split(/\s+/);
+        if (parts.length < 3) continue;
 
-        if (parts.length < 3) {
+        const candidatePort = Number(parts[2]);
+        if (!Number.isInteger(candidatePort) || candidatePort < 1 || candidatePort > 65535) {
           continue;
         }
 
-        const candidatePort =
-          Number(parts[2]);
-
-        if (
-          !Number.isInteger(
-            candidatePort
-          ) ||
-          candidatePort < 1 ||
-          candidatePort > 65535
-        ) {
-          continue;
-        }
-
-        if (
-          parts[3] &&
-          parts[3].toLowerCase() ===
-            "tcp"
-        ) {
+        if (parts[3] && parts[3].toLowerCase() === "tcp") {
           port = candidatePort;
           break;
         }
@@ -922,30 +756,20 @@ async function fetchVpnGateServers() {
       }
 
       if (port === null) {
-        if (
-          hostName.startsWith(
-            "public-vpn-"
-          )
-        ) {
+        if (hostName.startsWith("public-vpn-")) {
           port = 443;
         } else {
           continue;
         }
       }
 
-      if (
-        !Number.isInteger(port) ||
-        port < 1 ||
-        port > 65535
-      ) {
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
         continue;
       }
 
       servers.push({
         uri: hostName,
-        name:
-          countryLong ||
-          hostName,
+        name: countryLong || hostName,
         port,
         ip,
         hostName,
@@ -954,9 +778,7 @@ async function fetchVpnGateServers() {
         icon: "",
       });
     } catch (e) {
-      console.log(
-        `⚠️ خطا در پردازش VPNGate: ${e.message}`
-      );
+      console.log(`⚠️ خطا در پردازش VPNGate: ${e.message}`);
     }
   }
 
@@ -964,27 +786,17 @@ async function fetchVpnGateServers() {
   const seen = new Set();
 
   for (const server of servers) {
-    const key =
-      `${server.hostName}:${server.port}`;
-
-    if (seen.has(key)) {
-      continue;
-    }
+    const key = `${server.hostName}:${server.port}`;
+    if (seen.has(key)) continue;
 
     seen.add(key);
     unique.push(server);
   }
 
-  console.log(
-    `VPNGate parser: ${unique.length} سرور SSTP معتبر استخراج شد.`
-  );
+  console.log(`VPNGate parser: ${unique.length} سرور SSTP معتبر استخراج شد.`);
 
-  for (
-    const server of unique.slice(0, 5)
-  ) {
-    console.log(
-      `    [VPNGate] ${server.hostName}:${server.port} (${server.ip})`
-    );
+  for (const server of unique.slice(0, 5)) {
+    console.log(`    [VPNGate] ${server.hostName}:${server.port} (${server.ip})`);
   }
 
   return unique;
@@ -994,42 +806,25 @@ async function fetchVpnGateServers() {
 // REAL SSTP
 // =====================================================================
 
-async function testSstpReal(
-  server,
-  timeoutMs = SSTP_TIMEOUT_MS
-) {
-  const host = String(
-    server.hostName ||
-      server.uri ||
-      ""
-  ).trim();
-
-  const port =
-    Number(server.port) || 443;
+async function testSstpReal(server, timeoutMs = SSTP_TIMEOUT_MS) {
+  const host = String(server.hostName || server.uri || "").trim();
+  const port = Number(server.port) || 443;
 
   if (!host) return null;
 
   const started = Date.now();
-
   let child = null;
   let pppInterface = null;
   let output = "";
   let settled = false;
 
-  const finish = async (
-    ok,
-    reason = ""
-  ) => {
+  const finish = async (ok, reason = "") => {
     if (settled) return null;
-
     settled = true;
 
     if (child?.pid) {
       try {
-        process.kill(
-          -child.pid,
-          "SIGTERM"
-        );
+        process.kill(-child.pid, "SIGTERM");
       } catch {
         try {
           child.kill("SIGTERM");
@@ -1039,10 +834,7 @@ async function testSstpReal(
       await sleep(1200);
 
       try {
-        process.kill(
-          -child.pid,
-          "SIGKILL"
-        );
+        process.kill(-child.pid, "SIGKILL");
       } catch {
         try {
           child.kill("SIGKILL");
@@ -1052,20 +844,9 @@ async function testSstpReal(
 
     if (pppInterface) {
       try {
-        await execFileP(
-          "sudo",
-          [
-            "-n",
-            "ip",
-            "link",
-            "set",
-            pppInterface,
-            "down",
-          ],
-          {
-            timeout: 3000,
-          }
-        );
+        await execFileP("sudo", ["-n", "ip", "link", "set", pppInterface, "down"], {
+          timeout: 3000,
+        });
       } catch {}
     }
 
@@ -1073,17 +854,12 @@ async function testSstpReal(
       console.log(
         `✅ [SSTP REAL] سالم (${Date.now() - started}ms): ${host}:${port} ${reason}`
       );
-
       return Date.now() - started;
     }
 
     console.log(
       `    [SSTP debug] ${host}:${port} -> ${reason}` +
-        (output
-          ? ` | ${output
-              .trim()
-              .slice(-3000)}`
-          : "")
+        (output ? ` | ${output.trim().slice(-3000)}` : "")
     );
 
     return null;
@@ -1117,56 +893,30 @@ async function testSstpReal(
       "nodeflate",
     ];
 
-    child = spawn(
-      "sudo",
-      args,
-      {
-        detached: true,
-        stdio: [
-          "ignore",
-          "pipe",
-          "pipe",
-        ],
-      }
-    );
+    child = spawn("sudo", args, {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
-    child.stdout.on(
-      "data",
-      data => {
-        output += data.toString();
-      }
-    );
+    child.stdout.on("data", data => {
+      output += data.toString();
+    });
 
-    child.stderr.on(
-      "data",
-      data => {
-        output += data.toString();
-      }
-    );
+    child.stderr.on("data", data => {
+      output += data.toString();
+    });
 
     let childExitInfo = null;
 
-    child.once(
-      "exit",
-      (code, signal) => {
-        childExitInfo = {
-          code,
-          signal,
-        };
-      }
-    );
+    child.once("exit", (code, signal) => {
+      childExitInfo = { code, signal };
+    });
 
-    child.once(
-      "error",
-      error => {
-        childExitInfo = {
-          error: error.message,
-        };
-      }
-    );
+    child.once("error", error => {
+      childExitInfo = { error: error.message };
+    });
 
-    const deadline =
-      Date.now() + timeoutMs;
+    const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
       await sleep(500);
@@ -1174,64 +924,28 @@ async function testSstpReal(
       let links = "";
 
       try {
-        const result =
-          await execFileP(
-            "ip",
-            [
-              "-o",
-              "link",
-              "show",
-              "type",
-              "ppp",
-            ],
-            {
-              timeout: 3000,
-            }
-          );
-
-        links =
-          result.stdout || "";
+        const result = await execFileP("ip", ["-o", "link", "show", "type", "ppp"], {
+          timeout: 3000,
+        });
+        links = result.stdout || "";
       } catch {}
 
-      const matches = [
-        ...links.matchAll(
-          /^\d+:\s+(ppp\d+):/gm
-        ),
-      ];
+      const matches = [...links.matchAll(/^\d+:\s+(ppp\d+):/gm)];
 
       if (matches.length > 0) {
-        pppInterface =
-          matches[
-            matches.length - 1
-          ][1];
-
+        pppInterface = matches[matches.length - 1][1];
         let address = "";
 
         try {
-          const result =
-            await execFileP(
-              "ip",
-              [
-                "-4",
-                "addr",
-                "show",
-                "dev",
-                pppInterface,
-              ],
-              {
-                timeout: 3000,
-              }
-            );
-
-          address =
-            result.stdout || "";
+          const result = await execFileP(
+            "ip",
+            ["-4", "addr", "show", "dev", pppInterface],
+            { timeout: 3000 }
+          );
+          address = result.stdout || "";
         } catch {}
 
-        if (
-          /inet\s+\d+\.\d+\.\d+\.\d+/.test(
-            address
-          )
-        ) {
+        if (/inet\s+\d+\.\d+\.\d+\.\d+/.test(address)) {
           break;
         }
       }
@@ -1239,84 +953,55 @@ async function testSstpReal(
       if (childExitInfo) {
         return finish(
           false,
-          `sstpc قبل از PPP خارج شد: ${JSON.stringify(
-            childExitInfo
-          )}`
+          `sstpc قبل از PPP خارج شد: ${JSON.stringify(childExitInfo)}`
         );
       }
     }
 
     if (!pppInterface) {
-      return finish(
-        false,
-        "PPP interface ساخته نشد / timeout"
-      );
+      return finish(false, "PPP interface ساخته نشد / timeout");
     }
 
     if (SSTP_INTERNET_TEST) {
       try {
-        const { stdout } =
-          await execFileP(
-            "curl",
-            [
-              "--interface",
-              pppInterface,
-              "-4",
-              "--connect-timeout",
-              "8",
-              "--max-time",
-              "12",
-              "-sS",
-              "-o",
-              "/dev/null",
-              "-w",
-              "%{http_code}",
-              SSTP_TEST_URL,
-            ],
-            {
-              timeout: 15000,
-            }
-          );
+        const { stdout } = await execFileP(
+          "curl",
+          [
+            "--interface",
+            pppInterface,
+            "-4",
+            "--connect-timeout",
+            "8",
+            "--max-time",
+            "12",
+            "-sS",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            SSTP_TEST_URL,
+          ],
+          { timeout: 15000 }
+        );
 
-        const code =
-          stdout.trim();
+        const code = stdout.trim();
 
-        if (
-          code === "204" ||
-          (code.startsWith("2") &&
-            code.length === 3)
-        ) {
+        if (code === "204" || (code.startsWith("2") && code.length === 3)) {
           return finish(
             true,
             `PPP=${pppInterface}, HTTP=${code}, Internet=${Date.now() - started}ms`
           );
         }
 
-        return finish(
-          false,
-          `اینترنت ناموفق؛ HTTP=${code || "empty"}`
-        );
+        return finish(false, `اینترنت ناموفق؛ HTTP=${code || "empty"}`);
       } catch (e) {
-        return finish(
-          false,
-          `تست اینترنت شکست خورد: ${
-            e.code || e.message
-          }`
-        );
+        return finish(false, `تست اینترنت شکست خورد: ${e.code || e.message}`);
       }
     }
 
-    return finish(
-      true,
-      `PPP=${pppInterface}`
-    );
+    return finish(true, `PPP=${pppInterface}`);
   } catch (e) {
-    return finish(
-      false,
-      `خطای SSTP: ${
-        e.code || e.message
-      }`
-    );
+    return finish(false, `خطای SSTP: ${e.code || e.message}`);
   }
 }
 
@@ -1325,31 +1010,17 @@ async function testSstpReal(
 // =====================================================================
 
 function cryptoRandomUuid() {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(
-    /[xy]/g,
-    c => {
-      const r =
-        (Math.random() * 16) | 0;
-
-      const v =
-        c === "x"
-          ? r
-          : (r & 0x3) | 0x8;
-
-      return v.toString(16);
-    }
-  );
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
-function testSstpHandshake(
-  host,
-  port = 443,
-  timeoutMs = SSTP_TIMEOUT_MS
-) {
+function testSstpHandshake(host, port = 443, timeoutMs = SSTP_TIMEOUT_MS) {
   return new Promise(resolve => {
     let settled = false;
     let buffer = "";
-
     const start = Date.now();
 
     const socket = tls.connect({
@@ -1362,71 +1033,33 @@ function testSstpHandshake(
 
     const finish = ok => {
       if (settled) return;
-
       settled = true;
-
       socket.destroy();
-
-      resolve(
-        ok
-          ? Date.now() - start
-          : null
-      );
+      resolve(ok ? Date.now() - start : null);
     };
 
-    socket.on(
-      "secureConnect",
-      () => {
-        const guid =
-          "BA195980-CD49-458b-9E23-C84EE0ADCD75";
+    socket.on("secureConnect", () => {
+      const guid = "BA195980-CD49-458b-9E23-C84EE0ADCD75";
+      const correlation = cryptoRandomUuid();
+      const req =
+        `SSTP_DUPLEX_POST /sra_{${guid}} HTTP/1.1\r\n` +
+        `Content-Length: 18446744073709551615\r\n` +
+        `Host: ${host}\r\n` +
+        `SSTPCORRELATIONID: {${correlation}}\r\n\r\n`;
 
-        const correlation =
-          cryptoRandomUuid();
+      socket.write(req);
+    });
 
-        const req =
-          `SSTP_DUPLEX_POST /sra_{${guid}} HTTP/1.1\r\n` +
-          `Content-Length: 18446744073709551615\r\n` +
-          `Host: ${host}\r\n` +
-          `SSTPCORRELATIONID: {${correlation}}\r\n\r\n`;
-
-        socket.write(req);
+    socket.on("data", chunk => {
+      buffer += chunk.toString("utf8");
+      if (buffer.includes("HTTP/1.1 200") || buffer.includes("HTTP/1.0 200")) {
+        finish(true);
       }
-    );
+    });
 
-    socket.on(
-      "data",
-      chunk => {
-        buffer += chunk.toString(
-          "utf8"
-        );
-
-        if (
-          buffer.includes(
-            "HTTP/1.1 200"
-          ) ||
-          buffer.includes(
-            "HTTP/1.0 200"
-          )
-        ) {
-          finish(true);
-        }
-      }
-    );
-
-    socket.on(
-      "error",
-      () => finish(false)
-    );
-
-    socket.on(
-      "timeout",
-      () => finish(false)
-    );
-
-    socket.on(
-      "end",
-      () => finish(false)
-    );
+    socket.on("error", () => finish(false));
+    socket.on("timeout", () => finish(false));
+    socket.on("end", () => finish(false));
   });
 }
 
@@ -1436,78 +1069,41 @@ function testSstpHandshake(
 
 async function testOneSstp(server) {
   if (SSTP_REAL_TUNNEL) {
-    return await testSstpReal(
-      server
-    );
+    return await testSstpReal(server);
   } else {
-    return await testSstpHandshake(
-      server.hostName ||
-        server.uri,
-      server.port
-    );
+    return await testSstpHandshake(server.hostName || server.uri, server.port);
   }
 }
 
-async function testAllSstp(
-  servers,
-  concurrency
-) {
+async function testAllSstp(servers, concurrency) {
   const healthy = [];
-
   let nextIndex = 0;
 
   async function worker() {
     while (true) {
       const i = nextIndex++;
-
-      if (i >= servers.length) {
-        return;
-      }
+      if (i >= servers.length) return;
 
       const server = servers[i];
-
-      const ping =
-        await testOneSstp(server);
+      const ping = await testOneSstp(server);
 
       if (ping !== null) {
-        healthy.push({
-          ...server,
-          ping,
-        });
-
-        console.log(
-          `✅ [SSTP] سالم (${ping}ms): ${server.hostName}:${server.port}`
-        );
+        healthy.push({ ...server, ping });
+        console.log(`✅ [SSTP] سالم (${ping}ms): ${server.hostName}:${server.port}`);
       } else {
-        console.log(
-          `❌ [SSTP] ناسالم: ${server.hostName}:${server.port}`
-        );
+        console.log(`❌ [SSTP] ناسالم: ${server.hostName}:${server.port}`);
       }
     }
   }
 
   await Promise.all(
     Array.from(
-      {
-        length: Math.min(
-          Math.max(
-            concurrency,
-            1
-          ),
-          Math.max(
-            servers.length,
-            1
-          )
-        ),
-      },
+      { length: Math.min(Math.max(concurrency, 1), Math.max(servers.length, 1)) },
       worker
     )
   );
 
-  healthy.sort(
-    (a, b) => a.ping - b.ping
-  );
-
+  healthy.sort((a, b) => a.ping - b.ping);
   return healthy;
 }
 
@@ -1516,170 +1112,180 @@ async function testAllSstp(
 // =====================================================================
 
 async function main() {
-  console.log(
-    "🚀 شروع فرایند تست و بروزرسانی سرورها..."
-  );
+  console.log("🚀 شروع فرایند تست و بروزرسانی سرورها...");
 
-  let xrayCandidates = [];
-
-  try {
-    console.log(
-      "در حال دریافت سرورهای Xray از Cloudflare و GitHub..."
-    );
-
-    const [
-      cfResult,
-      ghResult,
-    ] = await Promise.allSettled([
-      fetchCloudflareServers(
-        CF_ALL_URL
-      ),
-
-      fetchGithubConfigs(
-        GH_RAW_URL
-      ),
-    ]);
-
-    if (
-      cfResult.status ===
-      "fulfilled"
-    ) {
-      xrayCandidates.push(
-        ...cfResult.value
-      );
-    }
-
-    if (
-      ghResult.status ===
-      "fulfilled"
-    ) {
-      xrayCandidates.push(
-        ...ghResult.value
-      );
-    }
-
-    const seen = new Set();
-
-    xrayCandidates =
-      xrayCandidates
-        .filter(s => {
-          const k =
-            dedupKey(s.uri);
-
-          if (seen.has(k)) {
-            return false;
-          }
-
-          seen.add(k);
-
-          return true;
-        })
-        .slice(
-          0,
-          MAX_CANDIDATES
-        );
-  } catch (e) {
-    console.error(
-      "خطا در دریافت سرورهای Xray:",
-      e.message
-    );
-  }
-
-  console.log(
-    `تعداد ${xrayCandidates.length} کاندید Xray برای تست آماده شد.`
-  );
-
-  const xrayResults =
-    await testAll(
-      xrayCandidates,
-      CONCURRENCY
-    );
-
-  let sstpCandidates = [];
-
-  try {
-    const vpnGateServers =
-      await fetchVpnGateServers();
-
-    sstpCandidates =
-      vpnGateServers.slice(
-        0,
-        MAX_SSTP_CANDIDATES
-      );
-  } catch (e) {
-    console.error(
-      "خطا در دریافت سرورهای VPNGate:",
-      e.message
-    );
-  }
-
-  console.log(
-    `تعداد ${sstpCandidates.length} کاندید SSTP برای تست آماده شد.`
-  );
-
-  const healthySstp =
-    await testAllSstp(
-      sstpCandidates,
-      SSTP_CONCURRENCY
-    );
+  let cloudflareServers = [];
+  let githubServers = [];
 
   // ===================================================================
-  // Final client-compatible server list
+  // دریافت Cloudflare و GitHub
+  // ===================================================================
+
+  const [cfResult, ghResult] = await Promise.allSettled([
+    fetchCloudflareServers(CF_ALL_URL),
+    fetchGithubConfigs(GH_RAW_URL),
+  ]);
+
+  if (cfResult.status === "fulfilled") {
+    cloudflareServers = cfResult.value;
+  } else {
+    console.error(
+      "خطا در دریافت سرورهای Cloudflare:",
+      cfResult.reason?.message || cfResult.reason
+    );
+  }
+
+  if (ghResult.status === "fulfilled") {
+    githubServers = ghResult.value;
+  } else {
+    console.error(
+      "خطا در دریافت سرورهای GitHub:",
+      ghResult.reason?.message || ghResult.reason
+    );
+  }
+
+  // ===================================================================
+  // تفکیک Cloudflare بر اساس port
+  //
+  // port = v2ray  -> تست با Xray Core
+  // port = عدد     -> تست با SSTP
+  // ===================================================================
+
+  const cloudflareXray = cloudflareServers.filter(
+    server => server.port === "v2ray"
+  );
+
+  const cloudflareSstp = cloudflareServers.filter(server => {
+    if (server.port === "v2ray") return false;
+
+    const port = Number(server.port);
+
+    return (
+      Number.isInteger(port) &&
+      port >= 1 &&
+      port <= 65535
+    );
+  });
+
+  console.log(
+    `☁️ Cloudflare: ${cloudflareXray.length} سرور Xray و ${cloudflareSstp.length} سرور SSTP`
+  );
+  console.log(`🐙 GitHub: ${githubServers.length} کانفیگ Xray`);
+
+  // ===================================================================
+  // Xray candidates
+  // فقط Cloudflare با port=v2ray + GitHub
+  // ===================================================================
+
+  let xrayCandidates = [...cloudflareXray, ...githubServers];
+
+  const seenXray = new Set();
+
+  xrayCandidates = xrayCandidates
+    .filter(server => {
+      const key = dedupKey(server.uri);
+
+      if (!key || seenXray.has(key)) {
+        return false;
+      }
+
+      seenXray.add(key);
+      return true;
+    })
+    .slice(0, MAX_CANDIDATES);
+
+  console.log(
+    `🧪 تعداد ${xrayCandidates.length} کاندید Xray برای تست آماده شد.`
+  );
+
+  const xrayResults = await testAll(xrayCandidates, CONCURRENCY);
+
+  // ===================================================================
+  // SSTP candidates
+  // Cloudflare با پورت عددی + VPNGate
+  // ===================================================================
+
+  let sstpCandidates = [...cloudflareSstp];
+
+  try {
+    const vpnGateServers = await fetchVpnGateServers();
+    sstpCandidates.push(...vpnGateServers);
+  } catch (e) {
+    console.error("خطا در دریافت سرورهای VPNGate:", e.message);
+  }
+
+  // حذف تکراری‌ها با host:port
+  const seenSstp = new Set();
+
+  sstpCandidates = sstpCandidates
+    .filter(server => {
+      const host = String(server.hostName || server.uri || "")
+        .trim()
+        .toLowerCase();
+      const port = String(server.port || "").trim();
+
+      if (!host || !port) return false;
+
+      const key = `${host}:${port}`;
+
+      if (seenSstp.has(key)) {
+        return false;
+      }
+
+      seenSstp.add(key);
+      return true;
+    })
+    .slice(0, MAX_SSTP_CANDIDATES);
+
+  console.log(
+    `🧪 تعداد ${sstpCandidates.length} کاندید SSTP برای تست آماده شد.`
+  );
+
+  const healthySstp = await testAllSstp(
+    sstpCandidates,
+    SSTP_CONCURRENCY
+  );
+
+  // ===================================================================
+  // ساخت لیست نهایی
+  //
+  // Xray  -> port = v2ray
+  // SSTP  -> port = عدد واقعی
   // ===================================================================
 
   const finalServers = [
-    ...xrayResults.healthy.map(
-      s => ({
-        address: s.uri,
-        name: s.name,
-        port: "v2ray",
-        ping: s.ping,
-        icon: s.icon || "",
-      })
-    ),
+    ...xrayResults.healthy.map(server => ({
+      address: server.uri,
+      name: server.name,
+      port: "v2ray",
+      ping: server.ping,
+      icon: server.icon || "",
+    })),
 
-    ...healthySstp.map(
-      s => ({
-        address:
-          s.hostName ||
-          s.uri,
-
-        name: s.name,
-
-        port: String(
-          s.port
-        ),
-
-        ping: s.ping,
-
-        icon: s.icon || "",
-      })
-    ),
+    ...healthySstp.map(server => ({
+      address: server.hostName || server.uri,
+      name: server.name,
+      port: String(server.port),
+      ping: server.ping,
+      icon: server.icon || "",
+    })),
   ];
 
-  console.log(
-    `تعداد کل سرورهای سالم: ${finalServers.length}`
-  );
+  console.log(`========================================`);
+  console.log(`✅ Xray سالم: ${xrayResults.healthy.length}`);
+  console.log(`✅ SSTP سالم: ${healthySstp.length}`);
+  console.log(`✅ تعداد کل سرورهای سالم: ${finalServers.length}`);
+  console.log(`========================================`);
 
-  if (
-    finalServers.length > 0
-  ) {
-    await uploadToCloudflare(
-      CF_UPDATE_URL,
-      finalServers
-    );
+  if (finalServers.length > 0) {
+    await uploadToCloudflare(CF_UPDATE_URL, finalServers);
   } else {
     console.log(
       "⚠️ هیچ سرور سالمی یافت نشد. آپدیت Cloudflare انجام نشد."
     );
   }
 }
-
 main().catch(err => {
-  console.error(
-    "❌ خطای اجرا:",
-    err
-  );
-
+  console.error("❌ خطای اجرا:", err);
   process.exit(1);
 });
