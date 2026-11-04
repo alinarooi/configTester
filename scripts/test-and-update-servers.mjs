@@ -2,70 +2,30 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import tls from "node:tls";
-import { spawn, execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileP = promisify(execFile);
-
-// =====================================================================
-// Environment Variables & Configuration
-// =====================================================================
+import net from "node:net";
 
 function requireEnv(name) {
   const value = process.env[name];
-
   if (!value) {
     console.error(`متغیر محیطی ${name} تنظیم نشده است.`);
     process.exit(1);
   }
-
   return value;
 }
 
 const CF_ALL_URL = requireEnv("CF_ALL_URL");
 const CF_UPDATE_URL = requireEnv("CF_UPDATE_URL");
-const GH_RAW_URL = requireEnv("GH_RAW_URL");
 
-const XRAY_BIN = process.env.XRAY_BIN || "./xray";
-const MAX_CANDIDATES = Number(process.env.MAX_CANDIDATES || 300);
-const CONCURRENCY = Number(process.env.CONCURRENCY || 12);
-const CORE_WARMUP_MS = Number(process.env.CORE_WARMUP_MS || 400);
-const TEST_TIMEOUT_S = Number(process.env.TEST_TIMEOUT_S || 5);
-const TEST_URL = process.env.TEST_URL || "https://www.gstatic.com/generate_204";
-const BASE_PORT = 20000;
+const CONCURRENCY = Number(process.env.CONCURRENCY || 20);
+const TEST_TIMEOUT_MS = Number(process.env.TEST_TIMEOUT_MS || 5000);
 const MIN_KEEP_RATIO = Number(process.env.MIN_KEEP_RATIO || 0.5);
-
-// =====================================================================
-// SSTP
-// =====================================================================
-
-const VPNGATE_API_URL = "http://www.vpngate.net/api/iphone/";
-const MAX_SSTP_CANDIDATES = Number(process.env.MAX_SSTP_CANDIDATES || 200);
-const SSTP_CONCURRENCY = Number(process.env.SSTP_CONCURRENCY || 1);
 const SSTP_TIMEOUT_MS = Number(process.env.SSTP_TIMEOUT_MS || 30000);
-const SSTP_USERNAME = process.env.SSTP_USERNAME || "vpn";
-const SSTP_PASSWORD = process.env.SSTP_PASSWORD || "vpn";
-const SSTP_REAL_TUNNEL = process.env.SSTP_REAL_TUNNEL === "1";
-const SSTP_INTERNET_TEST = process.env.SSTP_INTERNET_TEST !== "0";
-const SSTP_TEST_URL = process.env.SSTP_TEST_URL || "https://www.gstatic.com/generate_204";
 
 // =====================================================================
-// Helpers
+// Cloudflare - GET (دریافت لیست سرورها از ورکر کلودفلر)
 // =====================================================================
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function dedupKey(uri) {
-  return String(uri || "").trim().split("#")[0];
-}
-
-// =====================================================================
-// Cloudflare - GET
-// =====================================================================
-
 async function fetchCloudflareServers(url) {
+  console.log(`در حال دریافت لیست سرورها از ورکر کلودفلر: ${url}`);
   const res = await fetch(url, {
     signal: AbortSignal.timeout(15000),
   });
@@ -77,79 +37,57 @@ async function fetchCloudflareServers(url) {
   const arr = await res.json();
 
   if (!Array.isArray(arr)) {
-    throw new Error("پاسخ Cloudflare آرایه نیست.");
+    throw new Error("پاسخ ورکر کلودفلر آرایه نیست.");
   }
 
   return arr
     .map((o, i) => {
-      const rawPort = String(o.port ?? "").trim();
-      const numericPort = Number(rawPort);
+      const address = String(o.address || o.uri || "").trim();
+      const rawPort = String(o.port ?? "443").trim();
+      const numericPort = Number(rawPort) || 443;
+      const protocol = String(o.protocol || "softether_tcp").trim();
+      const operator = String(o.operator || "").trim();
 
       return {
         id: String(o.id ?? i),
-        uri: String(o.address || "").trim(),
-        name: String(o.country || `کلودفلر-${i + 1}`),
-        port:
-          rawPort.toLowerCase() === "v2ray"
-            ? "v2ray"
-            : Number.isInteger(numericPort) && numericPort >= 1 && numericPort <= 65535
-              ? String(numericPort)
-              : "",
+        address,
+        port: numericPort,
+        protocol,
+        operator,
+        country: String(o.country || o.name || "Unknown").trim(),
         ping: Number.isFinite(Number(o.ping)) ? Number(o.ping) : -1,
-        ip: String(o.ip || "").trim(),
-        hostName: String(o.hostName || o.address || "").trim(),
         icon: String(o.icon || "").trim(),
       };
     })
-    .filter(s => s.uri.length > 0 && s.port.length > 0);
+    .filter(s => s.address.length > 0);
 }
 
 // =====================================================================
-// Cloudflare - UPDATE
+// Cloudflare - UPDATE (با محافظ امنیتی برای جلوگیری از حذف کل سرورها)
 // =====================================================================
-
-async function uploadToCloudflare(url, servers) {
-  if (!Array.isArray(servers)) {
+async function uploadToCloudflare(url, newServers, existingServersCount) {
+  if (!Array.isArray(newServers)) {
     throw new Error("لیست نهایی آرایه نیست.");
   }
 
-  const body = servers
-    .map((s, index) => {
-      const address = String(s.address || s.uri || "").trim();
-      const country = String(s.country || s.name || "Unknown").trim();
-      const rawPort = String(s.port ?? "").trim();
-      const isV2Ray = rawPort.toLowerCase() === "v2ray";
-      const numericPort = Number(rawPort);
+  if (existingServersCount > 10 && newServers.length < existingServersCount * MIN_KEEP_RATIO) {
+    console.warn(`⚠️ هشدار امنیتی: تعداد سرورهای سالم (${newServers.length}) کمتر از حد مجاز نسبت به قبلی‌ها (${existingServersCount}) است. آپدیت لغو شد تا سرورها پاک نشوند.`);
+    return;
+  }
 
-      if (!address) return null;
-
-      if (isV2Ray) {
-        return {
-          id: String(index),
-          address,
-          country,
-          port: "v2ray",
-          icon: String(s.icon || "").trim(),
-        };
-      }
-
-      if (
-        !Number.isInteger(numericPort) ||
-        numericPort < 1 ||
-        numericPort > 65535
-      ) {
-        return null;
-      }
-
-      return {
-        id: String(index),
-        address,
-        country,
-        port: String(numericPort),
-        icon: String(s.icon || "").trim(),
-      };
-    })
-    .filter(Boolean);
+  const body = newServers.map((s, index) => ({
+    id: String(index),
+    address: String(s.address || "").trim(),
+    port: String(s.port || 443),
+    protocol: String(s.protocol || "softether_tcp").trim(),
+    operator: String(s.operator || "").trim(),
+    country: String(s.country || "Unknown").trim(),
+    icon: String(s.icon || "").trim(),
+    ok: true,
+    reason: "ok",
+    ms: s.ping || 0,
+    tested_at: Math.floor(Date.now() / 1000)
+  }));
 
   const res = await fetch(url, {
     method: "POST",
@@ -163,473 +101,44 @@ async function uploadToCloudflare(url, servers) {
   const responseText = await res.text();
 
   if (!res.ok) {
-    throw new Error(
-      `Cloudflare update HTTP ${res.status}: ${responseText.slice(0, 500)}`
-    );
+    throw new Error(`Cloudflare update HTTP ${res.status}: ${responseText.slice(0, 500)}`);
   }
 
   console.log(`☁️ Cloudflare با موفقیت آپدیت شد: ${body.length} سرور`);
-
-  if (responseText) {
-    console.log(`Cloudflare response: ${responseText.slice(0, 500)}`);
-  }
 }
 
 // =====================================================================
-// GitHub configs
+// SoftEther TCP Probe Tester
 // =====================================================================
-
-async function fetchGithubConfigs(url) {
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(15000),
-  });
-
-  if (!res.ok) {
-    throw new Error(`GitHub HTTP ${res.status}`);
-  }
-
-  let text = await res.text();
-  const decoded = tryBase64Decode(text.trim());
-
-  if (decoded && decoded.includes("://")) {
-    text = decoded;
-  }
-
-  const schemes = [
-    "vless://",
-    "vmess://",
-    "ss://",
-    "trojan://",
-    "hysteria2://",
-    "hy2://",
-  ];
-
-  return text
-    .split("\n")
-    .map(line => line.trim())
-    .filter(line => schemes.some(scheme => line.startsWith(scheme)))
-    .map((uri, i) => ({
-      uri,
-      name: `گیت‌هاب-${i + 1}`,
-      port: "v2ray",
-      ping: -1,
-      icon: "",
-    }));
-}
-
-function tryBase64Decode(s) {
-  try {
-    return Buffer.from(s, "base64").toString("utf8");
-  } catch {
-    return null;
-  }
-}
-
-// =====================================================================
-// Xray config
-// =====================================================================
-
-function parseLinkToOutbound(link) {
-  const scheme = link.split("://")[0];
-
-  switch (scheme) {
-    case "vless":
-      return buildVless(link);
-    case "vmess":
-      return buildVmess(link);
-    case "trojan":
-      return buildTrojan(link);
-    case "ss":
-      return buildShadowsocks(link);
-    case "hysteria2":
-    case "hy2":
-      return buildHysteria(link);
-    default:
-      throw new Error(`پروتکل ناشناخته: ${scheme}`);
-  }
-}
-
-function buildStreamSettings({
-  security,
-  network,
-  sni,
-  fp,
-  alpn,
-  path: wsPath,
-  host,
-  mode,
-  serviceName,
-  pbk,
-  sid,
-  spx,
-}) {
-  const settings = {
-    network,
-    security,
-  };
-
-  if (security === "tls") {
-    settings.tlsSettings = {
-      serverName: sni,
-    };
-
-    if (fp) {
-      settings.tlsSettings.fingerprint = fp;
-    }
-
-    if (alpn) {
-      settings.tlsSettings.alpn = alpn.split(",");
-    }
-  }
-
-  if (security === "reality") {
-    settings.realitySettings = {
-      serverName: sni,
-      publicKey: pbk || "",
-    };
-
-    if (fp) {
-      settings.realitySettings.fingerprint = fp;
-    }
-
-    if (sid) {
-      settings.realitySettings.shortId = sid;
-    }
-
-    if (spx) {
-      settings.realitySettings.spiderX = spx;
-    }
-  }
-
-  if (network === "ws") {
-    settings.wsSettings = {
-      path: wsPath || "/",
-      headers: {
-        Host: host,
-      },
-    };
-  }
-
-  if (network === "xhttp") {
-    settings.xhttpSettings = {
-      path: wsPath || "/",
-      mode: mode || "auto",
-      host,
-    };
-  }
-
-  if (network === "grpc") {
-    settings.grpcSettings = {
-      serviceName: serviceName || "",
-    };
-  }
-
-  return settings;
-}
-
-// =====================================================================
-// VLESS
-// =====================================================================
-
-function buildVless(link) {
-  const u = new URL(link);
-  const uuid = decodeURIComponent(u.username);
-  const host = u.hostname;
-  const port = Number(u.port) || 443;
-  const q = (key, def = "") => u.searchParams.get(key) || def;
-
-  return {
-    tag: "proxy",
-    protocol: "vless",
-    settings: {
-      vnext: [
-        {
-          address: host,
-          port,
-          users: [
-            {
-              id: uuid,
-              encryption: q("encryption", "none"),
-            },
-          ],
-        },
-      ],
-    },
-    streamSettings: buildStreamSettings({
-      security: q("security", "none"),
-      network: q("type", "tcp"),
-      sni: q("sni", host),
-      fp: q("fp"),
-      alpn: q("alpn"),
-      path: q("path", "/"),
-      host: q("host", host),
-      mode: q("mode", "auto"),
-      serviceName: q("serviceName"),
-      pbk: q("pbk"),
-      sid: q("sid"),
-      spx: q("spx"),
-    }),
-  };
-}
-
-// =====================================================================
-// VMESS
-// =====================================================================
-
-function buildVmess(link) {
-  const decoded = Buffer.from(link.replace("vmess://", ""), "base64").toString("utf8");
-  const j = JSON.parse(decoded);
-  const host = j.add;
-  const port = Number(j.port) || 443;
-
-  return {
-    tag: "proxy",
-    protocol: "vmess",
-    settings: {
-      vnext: [
-        {
-          address: host,
-          port,
-          users: [
-            {
-              id: j.id,
-              alterId: Number(j.aid || 0),
-              security: j.scy || "auto",
-            },
-          ],
-        },
-      ],
-    },
-    streamSettings: buildStreamSettings({
-      security: j.tls === "tls" ? "tls" : "none",
-      network: j.net || "tcp",
-      sni: j.sni || j.host || host,
-      fp: j.fp || "",
-      alpn: j.alpn || "",
-      path: j.path || "/",
-      host: j.host || host,
-      mode: "auto",
-      serviceName: j.path || "",
-    }),
-  };
-}
-
-// =====================================================================
-// TROJAN
-// =====================================================================
-
-function buildTrojan(link) {
-  const u = new URL(link);
-  const password = decodeURIComponent(u.username);
-  const host = u.hostname;
-  const port = Number(u.port) || 443;
-  const q = (key, def = "") => u.searchParams.get(key) || def;
-
-  return {
-    tag: "proxy",
-    protocol: "trojan",
-    settings: {
-      servers: [
-        {
-          address: host,
-          port,
-          password,
-        },
-      ],
-    },
-    streamSettings: buildStreamSettings({
-      security: q("security", "tls"),
-      network: q("type", "tcp"),
-      sni: q("sni", host),
-      fp: q("fp"),
-      alpn: q("alpn"),
-      path: q("path", "/"),
-      host: q("host", host),
-      mode: q("mode", "auto"),
-      serviceName: q("serviceName"),
-    }),
-  };
-}
-
-// =====================================================================
-// SHADOWSOCKS
-// =====================================================================
-
-function buildShadowsocks(link) {
-  const raw = link.replace("ss://", "").split("#")[0];
-  let method, password, host, port;
-
-  if (raw.includes("@")) {
-    const [userInfo, hostPart] = raw.split("@");
-    let decoded;
-
-    try {
-      decoded = Buffer.from(userInfo, "base64url").toString("utf8");
-    } catch {
-      decoded = Buffer.from(userInfo, "base64").toString("utf8");
-    }
-
-    [method, password] = decoded.split(":");
-    const hostPort = hostPart.split("/")[0].split("?")[0];
-    const idx = hostPort.lastIndexOf(":");
-    host = hostPort.slice(0, idx);
-    port = Number(hostPort.slice(idx + 1));
-  } else {
-    const decoded = Buffer.from(raw, "base64").toString("utf8");
-    const [methodPass, hostPort] = decoded.split("@");
-    [method, password] = methodPass.split(":");
-    const idx = hostPort.lastIndexOf(":");
-    host = hostPort.slice(0, idx);
-    port = Number(hostPort.slice(idx + 1));
-  }
-
-  return {
-    tag: "proxy",
-    protocol: "shadowsocks",
-    settings: {
-      servers: [
-        {
-          address: host,
-          port,
-          method,
-          password,
-        },
-      ],
-    },
-  };
-}
-
-// =====================================================================
-// HYSTERIA
-// =====================================================================
-
-function buildHysteria(link) {
-  const u = new URL(link);
-  const auth = u.username ? decodeURIComponent(u.username) : "";
-  const host = u.hostname;
-  const port = Number(u.port) || 443;
-  const q = (key, def = "") => u.searchParams.get(key) || def;
-
-  return {
-    tag: "proxy",
-    protocol: "hysteria",
-    settings: {
-      version: 2,
-      address: host,
-      port,
-    },
-    streamSettings: {
-      network: "hysteria",
-      security: "tls",
-      tlsSettings: {
-        serverName: q("sni", host),
-        allowInsecure: q("insecure", "0") === "1",
-      },
-      hysteriaSettings: {
-        version: 2,
-        auth,
-      },
-    },
-  };
-}
-
-// =====================================================================
-// Full Xray config
-// =====================================================================
-
-function buildFullConfig(outbound, socksPort) {
-  return {
-    log: {
-      loglevel: "warning",
-    },
-    inbounds: [
-      {
-        listen: "127.0.0.1",
-        port: socksPort,
-        protocol: "socks",
-        settings: {
-          auth: "noauth",
-          udp: false,
-        },
-      },
-    ],
-    outbounds: [
-      outbound,
-      {
-        tag: "direct",
-        protocol: "freedom",
-      },
-    ],
-  };
-}
-
-// =====================================================================
-// Test one Xray server
-// =====================================================================
-
-async function testOne(server, port) {
-  let outbound;
-
-  try {
-    outbound = parseLinkToOutbound(server.uri);
-  } catch {
-    return null;
-  }
-
-  const configPath = path.join(os.tmpdir(), `xray-test-${port}.json`);
-
-  await fs.writeFile(configPath, JSON.stringify(buildFullConfig(outbound, port)));
-
-  const child = spawn(XRAY_BIN, ["run", "-c", configPath], {
-    stdio: "ignore",
-  });
-
-  try {
-    await sleep(CORE_WARMUP_MS);
-
+function testSoftEtherTcp(ip, port, timeoutMs = TEST_TIMEOUT_MS) {
+  return new Promise(resolve => {
     const start = Date.now();
-    const { stdout } = await execFileP("curl", [
-      "--socks5",
-      `127.0.0.1:${port}`,
-      "-m",
-      String(TEST_TIMEOUT_S),
-      "-s",
-      "-o",
-      "/dev/null",
-      "-w",
-      "%{http_code}",
-      TEST_URL,
-    ]);
+    const socket = new net.Socket();
+    let settled = false;
 
-    const elapsed = Date.now() - start;
-    const code = stdout.trim();
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok ? Date.now() - start : null);
+    };
 
-    if (code === "204" || (code.startsWith("2") && code.length === 3)) {
-      return elapsed;
-    }
+    socket.setTimeout(timeoutMs);
+    socket.on("connect", () => finish(true));
+    socket.on("timeout", () => finish(false));
+    socket.on("error", () => finish(false));
 
-    return null;
-  } catch {
-    return null;
-  } finally {
     try {
-      child.kill("SIGKILL");
-    } catch {}
-
-    await fs.rm(configPath, { force: true });
-  }
+      socket.connect(port, ip);
+    } catch {
+      finish(false);
+    }
+  });
 }
 
-// =====================================================================
-// Test all Xray
-// =====================================================================
-
-async function testAll(servers, concurrency) {
+async function testAllSoftEther(servers, concurrency) {
   const healthy = [];
-  const tested = new Set();
-
   let nextIndex = 0;
-  let nextPort = BASE_PORT;
 
   async function worker() {
     while (true) {
@@ -637,386 +146,34 @@ async function testAll(servers, concurrency) {
       if (i >= servers.length) return;
 
       const server = servers[i];
-      const port = nextPort++;
+      const address = server.address;
+      const port = Number(server.port) || 443;
 
-      const ping = await testOne(server, port);
-      tested.add(dedupKey(server.uri));
+      const ping = await testSoftEtherTcp(address, port, TEST_TIMEOUT_MS);
 
-      if (ping != null) {
-        healthy.push({
-          ...server,
-          ping,
-        });
-
-        console.log(`✅ سالم (${ping}ms): ${server.name}`);
+      if (ping !== null) {
+        healthy.push({ ...server, ping, protocol: "softether_tcp" });
+        console.log(`✅ [SoftEther] سالم (${ping}ms): ${address}:${port} [operator=${server.operator}]`);
       } else {
-        console.log(`❌ ناسالم: ${server.name}`);
+        console.log(`❌ [SoftEther] ناسالم: ${address}:${port} [operator=${server.operator}]`);
       }
     }
   }
 
   await Promise.all(
     Array.from(
-      {
-        length: Math.min(
-          Math.max(concurrency, 1),
-          Math.max(servers.length, 1)
-        ),
-      },
+      { length: Math.min(Math.max(concurrency, 1), Math.max(servers.length, 1)) },
       worker
     )
   );
 
   healthy.sort((a, b) => a.ping - b.ping);
-
-  return {
-    healthy,
-    tested,
-  };
+  return healthy;
 }
 
 // =====================================================================
-// VPNGate hostname
+// SSTP Handshake Tester
 // =====================================================================
-
-function normalizeVpnGateHost(host) {
-  const h = String(host || "").trim().replace(/\.$/, "");
-
-  if (!h) return "";
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) return h;
-  if (h.includes(".")) return h;
-
-  return `${h}.opengw.net`;
-}
-
-// =====================================================================
-// VPNGate parser
-// =====================================================================
-
-async function fetchVpnGateServers() {
-  console.log("در حال دریافت لیست VPNGate...");
-
-  const res = await fetch(VPNGATE_API_URL, {
-    signal: AbortSignal.timeout(15000),
-  });
-
-  if (!res.ok) {
-    throw new Error(`VPNGate HTTP ${res.status}`);
-  }
-
-  const text = await res.text();
-  const lines = text.replace(/\r/g, "").split("\n").slice(2, -2);
-  const servers = [];
-
-  for (const line of lines) {
-    if (!line.trim()) continue;
-
-    try {
-      const cols = line.split(",");
-      const rawHostName = String(cols[0] || "").trim();
-      const ip = String(cols[1] || "").trim();
-      const countryLong = String(cols[5] || "Unknown").trim();
-
-      if (!rawHostName) continue;
-
-      const hostName = normalizeVpnGateHost(rawHostName);
-      if (!hostName || !/^[a-zA-Z0-9.-]+$/.test(hostName)) continue;
-
-      const ovpnBase64 = cols.slice(14).join(",").trim();
-      let ovpnConfig = "";
-
-      if (ovpnBase64) {
-        try {
-          ovpnConfig = Buffer.from(ovpnBase64, "base64").toString("utf8");
-        } catch {
-          ovpnConfig = "";
-        }
-      }
-
-      let port = null;
-      const remoteLines = ovpnConfig.match(/^remote\s+\S+\s+\d+(?:\s+\S+)?/gm) || [];
-
-      for (const remoteLine of remoteLines) {
-        const parts = remoteLine.trim().split(/\s+/);
-        if (parts.length < 3) continue;
-
-        const candidatePort = Number(parts[2]);
-        if (!Number.isInteger(candidatePort) || candidatePort < 1 || candidatePort > 65535) {
-          continue;
-        }
-
-        if (parts[3] && parts[3].toLowerCase() === "tcp") {
-          port = candidatePort;
-          break;
-        }
-
-        if (port === null) {
-          port = candidatePort;
-        }
-      }
-
-      if (port === null) {
-        if (hostName.startsWith("public-vpn-")) {
-          port = 443;
-        } else {
-          continue;
-        }
-      }
-
-      if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        continue;
-      }
-
-      servers.push({
-        uri: hostName,
-        name: countryLong || hostName,
-        port,
-        ip,
-        hostName,
-        rawHostName,
-        ping: -1,
-        icon: "",
-      });
-    } catch (e) {
-      console.log(`⚠️ خطا در پردازش VPNGate: ${e.message}`);
-    }
-  }
-
-  const unique = [];
-  const seen = new Set();
-
-  for (const server of servers) {
-    const key = `${server.hostName}:${server.port}`;
-    if (seen.has(key)) continue;
-
-    seen.add(key);
-    unique.push(server);
-  }
-
-  console.log(`VPNGate parser: ${unique.length} سرور SSTP معتبر استخراج شد.`);
-
-  for (const server of unique.slice(0, 5)) {
-    console.log(`    [VPNGate] ${server.hostName}:${server.port} (${server.ip})`);
-  }
-
-  return unique;
-}
-
-// =====================================================================
-// REAL SSTP
-// =====================================================================
-
-async function testSstpReal(server, timeoutMs = SSTP_TIMEOUT_MS) {
-  const host = String(server.hostName || server.uri || "").trim();
-  const port = Number(server.port) || 443;
-
-  if (!host) return null;
-
-  const started = Date.now();
-  let child = null;
-  let pppInterface = null;
-  let output = "";
-  let settled = false;
-
-  const finish = async (ok, reason = "") => {
-    if (settled) return null;
-    settled = true;
-
-    if (child?.pid) {
-      try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {
-        try {
-          child.kill("SIGTERM");
-        } catch {}
-      }
-
-      await sleep(1200);
-
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try {
-          child.kill("SIGKILL");
-        } catch {}
-      }
-    }
-
-    if (pppInterface) {
-      try {
-        await execFileP("sudo", ["-n", "ip", "link", "set", pppInterface, "down"], {
-          timeout: 3000,
-        });
-      } catch {}
-    }
-
-    if (ok) {
-      console.log(
-        `✅ [SSTP REAL] سالم (${Date.now() - started}ms): ${host}:${port} ${reason}`
-      );
-      return Date.now() - started;
-    }
-
-    console.log(
-      `    [SSTP debug] ${host}:${port} -> ${reason}` +
-        (output ? ` | ${output.trim().slice(-3000)}` : "")
-    );
-
-    return null;
-  };
-
-  try {
-    const args = [
-      "-n",
-      "sstpc",
-      "--log-stderr",
-      "--log-level",
-      "3",
-      "--cert-warn",
-      "--tls-ext",
-      "--save-server-route",
-      "--user",
-      SSTP_USERNAME,
-      "--password",
-      SSTP_PASSWORD,
-      `${host}:${port}`,
-      "usepeerdns",
-      "require-mschap-v2",
-      "noauth",
-      "noipdefault",
-      "defaultroute",
-      "refuse-eap",
-      "refuse-pap",
-      "refuse-chap",
-      "refuse-mschap",
-      "nobsdcomp",
-      "nodeflate",
-    ];
-
-    child = spawn("sudo", args, {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    child.stdout.on("data", data => {
-      output += data.toString();
-    });
-
-    child.stderr.on("data", data => {
-      output += data.toString();
-    });
-
-    let childExitInfo = null;
-
-    child.once("exit", (code, signal) => {
-      childExitInfo = { code, signal };
-    });
-
-    child.once("error", error => {
-      childExitInfo = { error: error.message };
-    });
-
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      await sleep(500);
-
-      let links = "";
-
-      try {
-        const result = await execFileP("ip", ["-o", "link", "show", "type", "ppp"], {
-          timeout: 3000,
-        });
-        links = result.stdout || "";
-      } catch {}
-
-      const matches = [...links.matchAll(/^\d+:\s+(ppp\d+):/gm)];
-
-      if (matches.length > 0) {
-        pppInterface = matches[matches.length - 1][1];
-        let address = "";
-
-        try {
-          const result = await execFileP(
-            "ip",
-            ["-4", "addr", "show", "dev", pppInterface],
-            { timeout: 3000 }
-          );
-          address = result.stdout || "";
-        } catch {}
-
-        if (/inet\s+\d+\.\d+\.\d+\.\d+/.test(address)) {
-          break;
-        }
-      }
-
-      if (childExitInfo) {
-        return finish(
-          false,
-          `sstpc قبل از PPP خارج شد: ${JSON.stringify(childExitInfo)}`
-        );
-      }
-    }
-
-    if (!pppInterface) {
-      return finish(false, "PPP interface ساخته نشد / timeout");
-    }
-
-    if (SSTP_INTERNET_TEST) {
-      try {
-        const { stdout } = await execFileP(
-          "curl",
-          [
-            "--interface",
-            pppInterface,
-            "-4",
-            "--connect-timeout",
-            "8",
-            "--max-time",
-            "12",
-            "-sS",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            SSTP_TEST_URL,
-          ],
-          { timeout: 15000 }
-        );
-
-        const code = stdout.trim();
-
-        if (code === "204" || (code.startsWith("2") && code.length === 3)) {
-          return finish(
-            true,
-            `PPP=${pppInterface}, HTTP=${code}, Internet=${Date.now() - started}ms`
-          );
-        }
-
-        return finish(false, `اینترنت ناموفق؛ HTTP=${code || "empty"}`);
-      } catch (e) {
-        return finish(false, `تست اینترنت شکست خورد: ${e.code || e.message}`);
-      }
-    }
-
-    return finish(true, `PPP=${pppInterface}`);
-  } catch (e) {
-    return finish(false, `خطای SSTP: ${e.code || e.message}`);
-  }
-}
-
-// =====================================================================
-// SSTP handshake
-// =====================================================================
-
-function cryptoRandomUuid() {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
 function testSstpHandshake(host, port = 443, timeoutMs = SSTP_TIMEOUT_MS) {
   return new Promise(resolve => {
     let settled = false;
@@ -1040,13 +197,10 @@ function testSstpHandshake(host, port = 443, timeoutMs = SSTP_TIMEOUT_MS) {
 
     socket.on("secureConnect", () => {
       const guid = "BA195980-CD49-458b-9E23-C84EE0ADCD75";
-      const correlation = cryptoRandomUuid();
       const req =
         `SSTP_DUPLEX_POST /sra_{${guid}} HTTP/1.1\r\n` +
         `Content-Length: 18446744073709551615\r\n` +
-        `Host: ${host}\r\n` +
-        `SSTPCORRELATIONID: {${correlation}}\r\n\r\n`;
-
+        `Host: ${host}\r\n\r\n`;
       socket.write(req);
     });
 
@@ -1063,18 +217,6 @@ function testSstpHandshake(host, port = 443, timeoutMs = SSTP_TIMEOUT_MS) {
   });
 }
 
-// =====================================================================
-// SSTP Batch Tester
-// =====================================================================
-
-async function testOneSstp(server) {
-  if (SSTP_REAL_TUNNEL) {
-    return await testSstpReal(server);
-  } else {
-    return await testSstpHandshake(server.hostName || server.uri, server.port);
-  }
-}
-
 async function testAllSstp(servers, concurrency) {
   const healthy = [];
   let nextIndex = 0;
@@ -1085,13 +227,14 @@ async function testAllSstp(servers, concurrency) {
       if (i >= servers.length) return;
 
       const server = servers[i];
-      const ping = await testOneSstp(server);
+      const host = server.address;
+      const ping = await testSstpHandshake(host, server.port);
 
       if (ping !== null) {
-        healthy.push({ ...server, ping });
-        console.log(`✅ [SSTP] سالم (${ping}ms): ${server.hostName}:${server.port}`);
+        healthy.push({ ...server, ping, protocol: "sstp" });
+        console.log(`✅ [SSTP] سالم (${ping}ms): ${host}:${server.port} [operator=${server.operator}]`);
       } else {
-        console.log(`❌ [SSTP] ناسالم: ${server.hostName}:${server.port}`);
+        console.log(`❌ [SSTP] ناسالم: ${host}:${server.port} [operator=${server.operator}]`);
       }
     }
   }
@@ -1108,387 +251,56 @@ async function testAllSstp(servers, concurrency) {
 }
 
 // =====================================================================
-// Main Execution Workflow
+// Main Workflow
 // =====================================================================
-
 async function main() {
-  console.log("🚀 شروع فرایند تست و بروزرسانی سرورها...");
+  console.log("🚀 شروع فرایند تست و بروزرسانی سرورها از ورکر کلودفلر...");
 
-  let cloudflareServers = [];
-  let githubServers = [];
-  let vpnGateServers = [];
-
-  // ===================================================================
-  // مرحله 1: دریافت Cloudflare
-  //
-  // نکته مهم:
-  // تمام سرورهای فعلی Cloudflare ابتدا تست می‌شوند.
-  // هیچ MAX_CANDIDATES روی Cloudflare اعمال نمی‌شود.
-  // ===================================================================
-
+  let servers = [];
   try {
-    cloudflareServers = await fetchCloudflareServers(CF_ALL_URL);
-
-    console.log(
-      `☁️ تعداد کل سرورهای فعلی Cloudflare: ${cloudflareServers.length}`
-    );
+    servers = await fetchCloudflareServers(CF_ALL_URL);
+    console.log(`☁️ تعداد کل سرورهای دریافتی از ورکر: ${servers.length}`);
   } catch (e) {
-    console.error(
-      "❌ خطا در دریافت سرورهای Cloudflare:",
-      e.message || e
-    );
+    console.error("❌ خطا در دریافت سرورها از ورکر:", e.message);
+    process.exit(1);
   }
 
-  // ===================================================================
-  // مرحله 1-A: تفکیک Cloudflare به Xray و SSTP
-  // ===================================================================
+  if (servers.length === 0) {
+    console.log("⚠️ هیچ سروری برای تست در ورکر وجود ندارد.");
+    return;
+  }
 
-  const cloudflareXray = cloudflareServers.filter(
-    server => server.port === "v2ray"
-  );
+  // تفکیک سرورها بر اساس پروتکل ذخیره شده در ورکر
+  const softetherServers = servers.filter(s => s.protocol === "softether_tcp" || !s.protocol);
+  const sstpServers = servers.filter(s => s.protocol === "sstp");
 
-  const cloudflareSstp = cloudflareServers.filter(server => {
-    if (server.port === "v2ray") return false;
+  console.log(`📊 تفکیک برای تست: ${softetherServers.length} SoftEther و ${sstpServers.length} SSTP`);
 
-    const port = Number(server.port);
+  // تست همزمان سرورها با پورت و پروتکل خودشان
+  console.log("🧪 در حال تست سرورهای SoftEther...");
+  const healthySoftEther = await testAllSoftEther(softetherServers, CONCURRENCY);
 
-    return (
-      Number.isInteger(port) &&
-      port >= 1 &&
-      port <= 65535
-    );
-  });
+  console.log("🧪 در حال تست سرورهای SSTP...");
+  const healthySstp = await testAllSstp(sstpServers, 5);
 
-  console.log(
-    `☁️ Cloudflare: ${cloudflareXray.length} سرور Xray و ${cloudflareSstp.length} سرور SSTP`
-  );
-
-  // ===================================================================
-  // مرحله 1-B: تست تمام سرورهای Xray موجود در Cloudflare
-  // ===================================================================
-
-  console.log(
-    `🧪 در حال تست تمام ${cloudflareXray.length} سرور Xray موجود در Cloudflare...`
-  );
-
-  const cloudflareXrayResults = await testAll(
-    cloudflareXray,
-    CONCURRENCY
-  );
-
-  // ===================================================================
-  // مرحله 1-C: تست تمام سرورهای SSTP موجود در Cloudflare
-  // ===================================================================
-
-  console.log(
-    `🧪 در حال تست تمام ${cloudflareSstp.length} سرور SSTP موجود در Cloudflare...`
-  );
-
-  const cloudflareSstpHealthy = await testAllSstp(
-    cloudflareSstp,
-    SSTP_CONCURRENCY
-  );
-
-  // ===================================================================
-  // مرحله 1-D: ساخت لیست سالم Cloudflare
-  //
-  // سرورهای خراب Cloudflare اینجا حذف می‌شوند.
-  // ===================================================================
-
-  const healthyCloudflare = [
-    ...cloudflareXrayResults.healthy.map(server => ({
-      address: server.uri,
-      name: server.name,
-      port: "v2ray",
-      ping: server.ping,
-      icon: server.icon || "",
-    })),
-
-    ...cloudflareSstpHealthy.map(server => ({
-      address: server.hostName || server.uri,
-      name: server.name,
-      port: String(server.port),
-      ping: server.ping,
-      icon: server.icon || "",
-    })),
+  const allHealthyServers = [
+    ...healthySoftEther,
+    ...healthySstp
   ];
 
-  console.log(
-    `☁️ سرورهای سالم Cloudflare: ${healthyCloudflare.length} از ${cloudflareServers.length}`
-  );
-
-  // ===================================================================
-  // مرحله 2: دریافت GitHub
-  //
-  // GitHub فقط بعد از اتمام تست Cloudflare بررسی می‌شود.
-  // ===================================================================
+  console.log(`🎉 کل سرورهای سالم نهایی جهت آپدیت به ورکر: ${allHealthyServers.length} از ${servers.length}`);
 
   try {
-    githubServers = await fetchGithubConfigs(GH_RAW_URL);
-
-    console.log(
-      `🐙 GitHub: ${githubServers.length} کانفیگ دریافت شد.`
-    );
+    await uploadToCloudflare(CF_UPDATE_URL, allHealthyServers, servers.length);
   } catch (e) {
-    console.error(
-      "❌ خطا در دریافت سرورهای GitHub:",
-      e.message || e
-    );
+    console.error("❌ خطا در ارسال سرورهای سالم به ورکر:", e.message);
+    process.exit(1);
   }
 
-  // ===================================================================
-  // مرحله 2-A: آماده‌سازی و تست GitHub
-  //
-  // GitHub فقط منبع تأمین سرورهای سالم جدید است.
-  // سرورهایی که از قبل در Cloudflare هستند دوباره اضافه نمی‌شوند.
-  // ===================================================================
-
-  const healthyCloudflareXrayKeys = new Set(
-    healthyCloudflare
-      .filter(server => server.port === "v2ray")
-      .map(server => dedupKey(server.address))
-  );
-
-  let githubCandidates = [];
-  const seenGithub = new Set();
-
-  githubCandidates = githubServers
-    .filter(server => {
-      const key = dedupKey(server.uri);
-
-      if (!key || seenGithub.has(key)) {
-        return false;
-      }
-
-      // اگر همین کانفیگ قبلاً در Cloudflare بوده،
-      // نیازی نیست به لیست جدید اضافه شود.
-      if (healthyCloudflareXrayKeys.has(key)) {
-        return false;
-      }
-
-      seenGithub.add(key);
-      return true;
-    })
-    .slice(0, MAX_CANDIDATES);
-
-  console.log(
-    `🧪 تعداد ${githubCandidates.length} کاندید GitHub برای تست آماده شد.`
-  );
-
-  const githubResults = await testAll(
-    githubCandidates,
-    CONCURRENCY
-  );
-
-  const healthyGithub = githubResults.healthy.map(server => ({
-    address: server.uri,
-    name: server.name,
-    port: "v2ray",
-    ping: server.ping,
-    icon: server.icon || "",
-  }));
-
-  // ===================================================================
-  // مرحله 2-B: دریافت VPNGate
-  //
-  // VPNGate هم بعد از Cloudflare بررسی می‌شود.
-  // ===================================================================
-
-  try {
-    vpnGateServers = await fetchVpnGateServers();
-
-    console.log(
-      `🌐 VPNGate: ${vpnGateServers.length} سرور SSTP دریافت شد.`
-    );
-  } catch (e) {
-    console.error(
-      "❌ خطا در دریافت سرورهای VPNGate:",
-      e.message || e
-    );
-  }
-
-  // ===================================================================
-  // مرحله 2-C: آماده‌سازی و تست VPNGate
-  // ===================================================================
-
-  const healthyCloudflareSstpKeys = new Set(
-    healthyCloudflare
-      .filter(server => server.port !== "v2ray")
-      .map(server => {
-        const host = String(server.address || "")
-          .trim()
-          .toLowerCase();
-
-        const port = String(server.port || "").trim();
-
-        return `${host}:${port}`;
-      })
-  );
-
-  const seenVpnGate = new Set();
-
-  const vpnGateCandidates = vpnGateServers
-    .filter(server => {
-      const host = String(server.hostName || server.uri || "")
-        .trim()
-        .toLowerCase();
-
-      const port = String(server.port || "").trim();
-
-      if (!host || !port) return false;
-
-      const key = `${host}:${port}`;
-
-      if (seenVpnGate.has(key)) {
-        return false;
-      }
-
-      // اگر سرور از قبل در Cloudflare بوده، دوباره اضافه نشود.
-      if (healthyCloudflareSstpKeys.has(key)) {
-        return false;
-      }
-
-      seenVpnGate.add(key);
-      return true;
-    })
-    .slice(0, MAX_SSTP_CANDIDATES);
-
-  console.log(
-    `🧪 تعداد ${vpnGateCandidates.length} کاندید VPNGate برای تست آماده شد.`
-  );
-
-  const healthyVpnGate = await testAllSstp(
-    vpnGateCandidates,
-    SSTP_CONCURRENCY
-  );
-
-  const healthyVpnGateServers = healthyVpnGate.map(server => ({
-    address: server.hostName || server.uri,
-    name: server.name,
-    port: String(server.port),
-    ping: server.ping,
-    icon: server.icon || "",
-  }));
-
-  // ===================================================================
-  // مرحله 3: ترکیب نهایی
-  //
-  // ترتیب:
-  // 1. سرورهای سالم باقی‌مانده از Cloudflare
-  // 2. سرورهای سالم جدید GitHub
-  // 3. سرورهای سالم جدید VPNGate
-  //
-  // در این مرحله دوباره Deduplicate انجام می‌شود تا هیچ سرور
-  // تکراری وارد Cloudflare نشود.
-  // ===================================================================
-
-  const finalServers = [];
-  const finalXrayKeys = new Set();
-  const finalSstpKeys = new Set();
-
-  // ---------------------------------------------------------------
-  // اضافه کردن Cloudflare سالم
-  // ---------------------------------------------------------------
-
-  for (const server of healthyCloudflare) {
-    if (server.port === "v2ray") {
-      const key = dedupKey(server.address);
-
-      if (!key || finalXrayKeys.has(key)) {
-        continue;
-      }
-
-      finalXrayKeys.add(key);
-      finalServers.push(server);
-      continue;
-    }
-
-    const host = String(server.address || "")
-      .trim()
-      .toLowerCase();
-
-    const port = String(server.port || "").trim();
-    const key = `${host}:${port}`;
-
-    if (!host || !port || finalSstpKeys.has(key)) {
-      continue;
-    }
-
-    finalSstpKeys.add(key);
-    finalServers.push(server);
-  }
-
-  // ---------------------------------------------------------------
-  // اضافه کردن GitHub سالم
-  // ---------------------------------------------------------------
-
-  for (const server of healthyGithub) {
-    const key = dedupKey(server.address);
-
-    if (!key || finalXrayKeys.has(key)) {
-      continue;
-    }
-
-    finalXrayKeys.add(key);
-    finalServers.push(server);
-  }
-
-  // ---------------------------------------------------------------
-  // اضافه کردن VPNGate سالم
-  // ---------------------------------------------------------------
-
-  for (const server of healthyVpnGateServers) {
-    const host = String(server.address || "")
-      .trim()
-      .toLowerCase();
-
-    const port = String(server.port || "").trim();
-    const key = `${host}:${port}`;
-
-    if (!host || !port || finalSstpKeys.has(key)) {
-      continue;
-    }
-
-    finalSstpKeys.add(key);
-    finalServers.push(server);
-  }
-
-  // ===================================================================
-  // گزارش نهایی
-  // ===================================================================
-
-  console.log(`========================================`);
-  console.log(`☁️ Cloudflare اولیه: ${cloudflareServers.length}`);
-  console.log(`☁️ Cloudflare سالم: ${healthyCloudflare.length}`);
-  console.log(`🐙 GitHub سالم جدید: ${healthyGithub.length}`);
-  console.log(`🌐 VPNGate سالم جدید: ${healthyVpnGateServers.length}`);
-  console.log(`========================================`);
-  console.log(`🧪 Xray سالم Cloudflare: ${cloudflareXrayResults.healthy.length}`);
-  console.log(`🧪 SSTP سالم Cloudflare: ${cloudflareSstpHealthy.length}`);
-  console.log(`🧪 Xray سالم GitHub: ${githubResults.healthy.length}`);
-  console.log(`🧪 SSTP سالم VPNGate: ${healthyVpnGate.length}`);
-  console.log(`========================================`);
-  console.log(`✅ تعداد نهایی سرورها: ${finalServers.length}`);
-  console.log(`========================================`);
-
-  // ===================================================================
-  // مرحله 4: ارسال لیست نهایی به Cloudflare
-  // ===================================================================
-
-  if (finalServers.length > 0) {
-    await uploadToCloudflare(
-      CF_UPDATE_URL,
-      finalServers
-    );
-  } else {
-    console.log(
-      "⚠️ هیچ سرور سالمی یافت نشد. آپدیت Cloudflare انجام نشد."
-    );
-  }
+  console.log("✅ عملیات تست و بروزرسانی با موفقیت به پایان رسید.");
 }
 
 main().catch(err => {
-  console.error("❌ خطای اجرا:", err);
+  console.error("❌ خطای ناشناخته:", err);
   process.exit(1);
 });
-
