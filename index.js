@@ -2,48 +2,21 @@ const fs = require('fs/promises');
 const net = require('net');
 const https = require('https');
 
-// لیست نام‌های ایرانی برای اختصاص به سرورهای موفق
-const iranianNames = ["سیمرغ", "سورنا", "آرتین", "ققنوس", "آریو", "کوروش", "بردیا", "رستم", "کاوه", "آرش"];
-
 // تنظیمات تست
-const TIMEOUT_MS = 3500; // 3.5 ثانیه زمان برای تست هر سرور
+const TIMEOUT_MS = 3500;
+const SSTP_HANDSHAKE_PATH = '/sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/';
 
 /**
- * تست پورت TCP برای سرورهای V2Ray (VMess)
+ * تست پروتکل SSTP روی هاست/IP و پورت مشخص (پیش‌فرض 443)
  */
-function testTcpPort(host, port) {
-    return new Promise((resolve) => {
-        const socket = new net.Socket();
-        
-        const timer = setTimeout(() => {
-            socket.destroy();
-            resolve(false);
-        }, TIMEOUT_MS);
-
-        socket.connect(port, host, () => {
-            clearTimeout(timer);
-            socket.destroy();
-            resolve(true); // پورت باز است
-        });
-
-        socket.on('error', () => {
-            clearTimeout(timer);
-            resolve(false);
-        });
-    });
-}
-
-/**
- * تست پروتکل SSTP روی پورت 443
- */
-function testSstpServer(ip) {
+function testSstpServer(host, port = 443) {
     return new Promise((resolve) => {
         const options = {
-            hostname: ip,
-            port: 443,
-            path: '/sra_{BA195980-CD49-458b-9E23-C84EE0ADCD75}/',
+            hostname: host,
+            port,
+            path: SSTP_HANDSHAKE_PATH,
             method: 'GET',
-            rejectUnauthorized: false, // نادیده گرفتن خطای گواهی SSL
+            rejectUnauthorized: false,
             timeout: TIMEOUT_MS
         };
 
@@ -62,41 +35,202 @@ function testSstpServer(ip) {
 }
 
 /**
- * پردازش و تست یک کانفیگ
+ * تست اتصال TCP خام برای سرورهای SoftEther TCP
  */
-async function processConfig(line) {
-    line = line.trim();
-    if (!line) return null;
+function testTcpSocket(host, port = 443) {
+    return new Promise((resolve) => {
+        const socket = new net.Socket();
 
-    try {
-        // تشخیص و پردازش VMess
-        if (line.startsWith('vmess://')) {
-            const base64Data = line.replace('vmess://', '');
-            const decodedStr = Buffer.from(base64Data, 'base64').toString('utf8');
-            const config = JSON.parse(decodedStr);
-            
-            const host = config.add || config.host;
-            const port = parseInt(config.port, 10);
+        const timer = setTimeout(() => {
+            socket.destroy();
+            resolve(false);
+        }, TIMEOUT_MS);
 
-            if (host && port) {
-                const isAlive = await testTcpPort(host, port);
-                if (isAlive) {
-                    return { type: 'vmess', raw: line, host, port };
-                }
-            }
-        } 
-        // فرض بر اینکه خطوط دیگر IP یا دامنه برای SSTP هستند
-        else {
-            const ip = line.split(':')[0]; // در صورت وجود پورت در متن، فقط IP را می‌گیریم
-            const isAlive = await testSstpServer(ip);
-            if (isAlive) {
-                return { type: 'sstp', raw: line, host: ip, port: 443 };
+        socket.connect(port, host, () => {
+            clearTimeout(timer);
+            socket.destroy();
+            resolve(true);
+        });
+
+        socket.on('error', () => {
+            clearTimeout(timer);
+            resolve(false);
+        });
+    });
+}
+
+/**
+ * تست متناسب با پروتکل SoftEther TCP:
+ * ابتدا باز بودن سوکت TCP را چک می‌کند و سپس یک handshake سبک HTTP/TLS روی همان پورت می‌فرستد
+ */
+function testSoftEtherTcpServer(host, port = 443) {
+    return new Promise(async (resolve) => {
+        const tcpOk = await testTcpSocket(host, port);
+        if (!tcpOk) {
+            return resolve(false);
+        }
+
+        const options = {
+            hostname: host,
+            port,
+            path: '/',
+            method: 'GET',
+            rejectUnauthorized: false,
+            timeout: TIMEOUT_MS
+        };
+
+        const req = https.request(options, (res) => {
+            resolve(res.statusCode > 0);
+        });
+
+        // اگر سوکت TCP باز بود ولی پاسخ HTTPS نداد، همچنان اگر پورت TCP پاسخ داده باشد قابل بررسی است
+        req.on('error', () => resolve(true));
+        req.on('timeout', () => {
+            req.destroy();
+            resolve(true);
+        });
+
+        req.end();
+    });
+}
+
+/**
+ * نرمال‌سازی نام پروتکل
+ */
+function normalizeProtocol(rawProto) {
+    const p = (rawProto || '').trim().toLowerCase();
+    if (p === 'softether' || p === 'softether_tcp' || p === 'se_tcp' || p === 'tcp') {
+        return 'softether_tcp';
+    }
+    if (p === 'sstp') {
+        return 'sstp';
+    }
+    return 'sstp';
+}
+
+/**
+ * تجزیه یک خط از فایل servers.txt
+ * فرمت‌های پشتیبانی‌شده:
+ * - host
+ * - host:port
+ * - host:port|protocol
+ * - host,port,protocol
+ * - یا یک شیء JSON در هر خط (مثلاً خروجی کلاینت: {"address":"...","port":"443","protocol":"softether_tcp"})
+ */
+function parseTarget(line) {
+    const cleaned = line.trim();
+    if (!cleaned || cleaned.startsWith('#')) return null;
+
+    // اگر خط به صورت JSON باشد
+    if (cleaned.startsWith('{')) {
+        const obj = JSON.parse(cleaned);
+        const host = String(obj.address || obj.full_host || obj.host || '').trim();
+        const port = parseInt(obj.port, 10) || 443;
+        const protocol = normalizeProtocol(obj.protocol || obj.type);
+        if (!host) return null;
+        return {
+            name: String(obj.name || obj.id || host).trim(),
+            host,
+            port,
+            protocol,
+            raw: cleaned,
+            meta: obj
+        };
+    }
+
+    let mainPart = cleaned;
+    let explicitProtocol = '';
+
+    if (cleaned.includes('|')) {
+        const [left, right] = cleaned.split('|').map((s) => s.trim());
+        mainPart = left;
+        explicitProtocol = right;
+    }
+
+    let host = mainPart;
+    let port = 443;
+
+    if (mainPart.includes(',')) {
+        const parts = mainPart.split(',').map((s) => s.trim());
+        host = parts[0] || '';
+        const parsedPort = parseInt(parts[1], 10);
+        if (Number.isInteger(parsedPort) && parsedPort > 0) port = parsedPort;
+        if (parts[2]) explicitProtocol = parts[2];
+    } else if (mainPart.startsWith('[')) {
+        const closeBracketIdx = mainPart.indexOf(']');
+        if (closeBracketIdx !== -1) {
+            host = mainPart.slice(1, closeBracketIdx).trim();
+            const rest = mainPart.slice(closeBracketIdx + 1).trim();
+            if (rest.startsWith(':')) {
+                const parsedPort = parseInt(rest.slice(1), 10);
+                if (Number.isInteger(parsedPort) && parsedPort > 0) port = parsedPort;
             }
         }
-    } catch (error) {
-        // نادیده گرفتن کانفیگ‌های خراب یا غیرقابل پارس
+    } else {
+        const colonCount = (mainPart.match(/:/g) || []).length;
+        if (colonCount === 1) {
+            const [rawHost, rawPort] = mainPart.split(':').map((s) => s.trim());
+            const parsedPort = parseInt(rawPort, 10);
+            if (rawHost && Number.isInteger(parsedPort) && parsedPort > 0) {
+                host = rawHost;
+                port = parsedPort;
+            }
+        }
     }
-    
+
+    if (!host) return null;
+
+    // اگر در خود رشته نشانی softether نوشته شده بود و پروتکل صریح داده نشده بود
+    if (!explicitProtocol && host.toLowerCase().includes('softether')) {
+        explicitProtocol = 'softether_tcp';
+    }
+
+    const protocol = normalizeProtocol(explicitProtocol);
+    return {
+        name: host,
+        host,
+        port,
+        protocol,
+        raw: cleaned,
+        meta: null
+    };
+}
+
+/**
+ * اجرای تست متناسب با پروتکل سرور
+ */
+async function runProtocolTest(target) {
+    if (target.protocol === 'softether_tcp') {
+        return testSoftEtherTcpServer(target.host, target.port);
+    }
+    return testSstpServer(target.host, target.port);
+}
+
+/**
+ * پردازش و تست یک خط از servers.txt
+ */
+async function processConfig(line) {
+    const target = parseTarget(line);
+    if (!target) return null;
+
+    try {
+        const isAlive = await runProtocolTest(target);
+        if (isAlive) {
+            return {
+                ...(target.meta || {}),
+                name: target.name,
+                type: target.protocol,
+                protocol: target.protocol,
+                host: target.host,
+                address: target.host,
+                port: target.port,
+                raw: target.raw
+            };
+        }
+    } catch (_) {
+        // نادیده گرفتن ورودی‌های نامعتبر یا ناموفق
+    }
+
     return null;
 }
 
@@ -139,28 +273,23 @@ async function updateCloudflareKV(serversList) {
  */
 async function main() {
     console.log("شروع خواندن فایل servers.txt...");
-    
+
     try {
         const fileContent = await fs.readFile('servers.txt', 'utf8');
-        const lines = fileContent.split('\n');
+        const lines = fileContent.split(/\r?\n/);
         console.log(`تعداد ${lines.length} خط خوانده شد. در حال تست سرورها...`);
 
         const validServers = [];
-        let nameIndex = 0;
-
-        // برای جلوگیری از مسدود شدن شبکه، سرورها را 10 تا 10 تا تست می‌کنیم (Concurrency Limit)
         const batchSize = 10;
+
         for (let i = 0; i < lines.length; i += batchSize) {
             const batch = lines.slice(i, i + batchSize);
             const results = await Promise.all(batch.map(processConfig));
-            
+
             for (const result of results) {
                 if (result) {
-                    // اختصاص نام ایرانی به سرور موفق
-                    result.name = iranianNames[nameIndex % iranianNames.length];
-                    nameIndex++;
                     validServers.push(result);
-                    console.log(`✅ سرور فعال پیدا شد: ${result.name} (${result.type})`);
+                    console.log(`✅ سرور فعال پیدا شد: ${result.name}:${result.port} [${result.protocol}]`);
                 }
             }
         }
@@ -172,7 +301,6 @@ async function main() {
         } else {
             console.log("هیچ سرور فعالی پیدا نشد. دیتابیس آپدیت نمی‌شود.");
         }
-
     } catch (error) {
         console.error("خطا در اجرای برنامه:", error.message);
     }
